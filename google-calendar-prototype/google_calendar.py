@@ -2,6 +2,8 @@ import json
 import os
 
 from pathlib import Path
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from googleapiclient.errors import HttpError
 
@@ -71,3 +73,47 @@ def sync_calendar(service) -> None:
     )
 
     print("SyncToken aggiornato.")
+
+def create_booking(
+    service,
+    calendar_id: str,
+    title: str,
+    start: datetime,
+    duration_minutes: int,
+) -> dict:
+    """Crea un appuntamento sul calendario Google di test."""
+
+    if not calendar_id or calendar_id == "primary":
+        raise ValueError("Calendar ID di test non valido")
+
+    if not title.strip():
+        raise ValueError("Il titolo dell'appuntamento è obbligatorio")
+
+    if duration_minutes <= 0:
+        raise ValueError("La durata deve essere positiva")
+
+    timezone = ZoneInfo("Europe/Rome")
+
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone)
+    else:
+        start = start.astimezone(timezone)
+
+    end = start + timedelta(minutes=duration_minutes)
+
+    event = {
+        "summary": title.strip(),
+        "start": {
+            "dateTime": start.isoformat(),
+            "timeZone": "Europe/Rome",
+        },
+        "end": {
+            "dateTime": end.isoformat(),
+            "timeZone": "Europe/Rome",
+        },
+    }
+
+    return service.events().insert(
+        calendarId=calendar_id,
+        body=event,
+    ).execute()
