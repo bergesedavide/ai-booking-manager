@@ -1,0 +1,21 @@
+# Ambiente Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Credenziali Google
+credentials.json
+token.json
+client_secret_*.json
+
+# Stato sincronizzazione
+sync_state.json
+
+# Backup temporanei
+main_legacy.py
+
+# File locali
+.env
+.env.*
+!.env.example
