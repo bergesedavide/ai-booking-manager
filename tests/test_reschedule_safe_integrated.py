@@ -258,6 +258,28 @@ def test_duplicate_original_event_id():
     )
 
 
+def test_primary_calendar_blocked():
+    service = make_service([], [])
+
+    try:
+        check_reschedule_availability_safe(
+            service=service,
+            calendar_id="primary",
+            event_id=EVENT_ID,
+            new_start=NEW_START,
+            duration_minutes=60,
+        )
+    except ValueError:
+        print("TEST SUPERATO: calendario primary bloccato")
+    else:
+        raise AssertionError(
+            "Il calendario primary non è stato bloccato"
+        )
+
+    service.events.assert_not_called()
+    service.freebusy.assert_not_called()
+
+
 if __name__ == "__main__":
     test_available()
     test_original_event_only()
@@ -267,3 +289,4 @@ if __name__ == "__main__":
     test_inconsistent_busy_intervals()
     test_original_duration_validation()
     test_duplicate_original_event_id()
+    test_primary_calendar_blocked()
