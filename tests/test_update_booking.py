@@ -17,6 +17,7 @@ def test_update_booking():
 
     original_event = {
         "id": "test-event-123",
+        "etag": '"versione-1"',
         "summary": "Allenamento Mario",
         "description": "Sessione personal training",
         "status": "confirmed",

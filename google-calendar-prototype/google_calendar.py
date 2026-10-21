@@ -326,6 +326,67 @@ def update_booking(
     return request.execute()
 
 
+def delete_booking(
+    service,
+    calendar_id: str,
+    event_id: str,
+    expected_etag: str,
+) -> None:
+    """
+    Cancella un appuntamento dal calendario Google di test.
+
+    Supporta soltanto appuntamenti singoli con orario esplicito.
+
+    Blocca la cancellazione se l'evento è stato modificato
+    dopo la richiesta iniziale.
+    """
+
+    # Impedisce operazioni sul calendario principale.
+    if not calendar_id or calendar_id == "primary":
+        raise ValueError("Calendar ID di test non valido")
+
+    if not event_id or not event_id.strip():
+        raise ValueError("Google Event ID obbligatorio")
+
+    if not expected_etag:
+        raise ValueError("ETag originale obbligatorio")
+
+    # Recupera la versione corrente dell'appuntamento.
+    event = get_booking(
+        service=service,
+        calendar_id=calendar_id,
+        event_id=event_id,
+    )
+
+    current_etag = event.get("etag")
+
+    if not current_etag:
+        raise ValueError(
+            "ETag mancante: cancellazione bloccata"
+        )
+
+    # Blocca la cancellazione se l'evento è cambiato.
+    if current_etag != expected_etag:
+        raise ValueError(
+            "L'appuntamento è cambiato dopo la richiesta iniziale. "
+            "Cancellazione bloccata."
+        )
+
+    # Prepara la richiesta DELETE.
+    request = service.events().delete(
+        calendarId=calendar_id,
+        eventId=event_id.strip(),
+    )
+
+    # Protegge anche da modifiche concorrenti
+    # tra il recupero dell'evento e la richiesta DELETE.
+    request.headers["If-Match"] = expected_etag
+
+    # Esegue la cancellazione.
+    # Eventuali errori vengono propagati al chiamante.
+    request.execute()
+
+
 def list_events_in_interval(
     service,
     calendar_id: str,

@@ -5,6 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -26,6 +27,7 @@ from google_calendar import (
     create_booking,
     get_booking,
     update_booking,
+    delete_booking,
 )
 
 
@@ -614,6 +616,296 @@ async def handle_reschedule_callback(
             )
 
 
+async def cancella(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Richiede conferma prima di cancellare un appuntamento."""
+
+    user = update.effective_user
+    message = update.effective_message
+
+    if user is None or message is None:
+        return
+
+    # Soltanto il professionista autorizzato può richiedere cancellazioni.
+    if user.id != ALLOWED_USER_ID:
+        print("Tentativo di cancellazione non autorizzato.")
+        return
+
+    if len(context.args) != 1:
+        await message.reply_text(
+            "Formato corretto:\n/cancella EVENT_ID"
+        )
+        return
+
+    event_id = context.args[0].strip()
+
+    if not event_id:
+        await message.reply_text("Google Event ID non valido.")
+        return
+
+    try:
+        credentials = authenticate()
+        service = build("calendar", "v3", credentials=credentials)
+
+        event = get_booking(
+            service=service,
+            calendar_id=CALENDAR_ID,
+            event_id=event_id,
+        )
+
+        expected_etag = event.get("etag")
+
+        if not expected_etag:
+            raise ValueError("ETag mancante")
+
+        title = event.get("summary", "Senza titolo")
+
+        rome = ZoneInfo("Europe/Rome")
+
+        start = datetime.fromisoformat(
+            event["start"]["dateTime"]
+        ).astimezone(rome)
+
+        end = datetime.fromisoformat(
+            event["end"]["dateTime"]
+        ).astimezone(rome)
+
+    except Exception as error:
+        print(
+            "Errore durante il recupero dell'appuntamento:",
+            type(error).__name__,
+        )
+
+        await message.reply_text(
+            "❌ Impossibile recuperare l'appuntamento.\n"
+            "Controlla il Google Event ID e riprova.\n\n"
+            "Nessuna cancellazione effettuata."
+        )
+        return
+
+    # Identificativo univoco della richiesta.
+    request_id = os.urandom(8).hex()
+
+    # Conserva i dati necessari alla futura conferma.
+    pending = context.user_data.setdefault(
+        "pending_deletions",
+        {},
+    )
+
+    pending[request_id] = {
+        "event_id": event_id,
+        "expected_etag": expected_etag,
+        "calendar_id": CALENDAR_ID,
+    }
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🗑️ Conferma cancellazione",
+                callback_data=f"delete_confirm:{request_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Annulla",
+                callback_data=f"delete_cancel:{request_id}",
+            )
+        ],
+    ])
+
+    await message.reply_text(
+        "🗑️ Richiesta di cancellazione\n\n"
+        f"Titolo: {title}\n"
+        f"Google Event ID: {event_id}\n"
+        f"Data: {start.strftime('%d/%m/%Y')}\n"
+        f"Orario: {start.strftime('%H:%M')} → "
+        f"{end.strftime('%H:%M')}\n\n"
+        "⚠️ Vuoi eliminare questo appuntamento da Google Calendar?",
+        reply_markup=keyboard,
+    )
+
+
+async def handle_delete_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Gestisce la conferma o l'annullamento di una cancellazione."""
+
+    query = update.callback_query
+    user = update.effective_user
+
+    if query is None:
+        return
+
+    if user is None or user.id != ALLOWED_USER_ID:
+        await query.answer(
+            "Non autorizzato.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    data = query.data or ""
+
+    try:
+        action, request_id = data.split(":", 1)
+    except ValueError:
+        await query.edit_message_text(
+            "❌ Richiesta non valida."
+        )
+        return
+
+    pending = context.user_data.setdefault(
+        "pending_deletions",
+        {},
+    )
+
+    # Consuma la richiesta: impedisce conferme duplicate.
+    deletion = pending.pop(request_id, None)
+
+    if deletion is None:
+        await query.edit_message_text(
+            "⚠️ Questa richiesta è già stata gestita "
+            "oppure non è più disponibile."
+        )
+        return
+
+    if action == "delete_cancel":
+        await query.edit_message_text(
+            "✅ Cancellazione annullata.\n"
+            "Nessuna modifica effettuata su Google Calendar."
+        )
+        return
+
+    if action != "delete_confirm":
+        await query.edit_message_text(
+            "❌ Operazione non riconosciuta."
+        )
+        return
+
+    event_id = deletion["event_id"]
+    calendar_id = deletion["calendar_id"]
+    expected_etag = deletion["expected_etag"]
+
+    try:
+        credentials = authenticate()
+        service = build(
+            "calendar",
+            "v3",
+            credentials=credentials,
+        )
+
+        # Controlla che l'appuntamento non sia cambiato.
+        event = get_booking(
+            service=service,
+            calendar_id=calendar_id,
+            event_id=event_id,
+        )
+
+        if event.get("etag") != expected_etag:
+            await query.edit_message_text(
+                "⚠️ L'appuntamento è stato modificato "
+                "dopo la richiesta di cancellazione.\n\n"
+                "Cancellazione bloccata."
+            )
+            return
+
+        # Esegue la cancellazione protetta da If-Match.
+        delete_booking(
+            service=service,
+            calendar_id=calendar_id,
+            event_id=event_id,
+            expected_etag=expected_etag,
+        )
+
+    except HttpError as error:
+        if error.resp.status == 412:
+            await query.edit_message_text(
+                "⚠️ L'appuntamento è cambiato durante "
+                "la cancellazione.\n\n"
+                "Operazione bloccata."
+            )
+            return
+
+        # Un errore diverso da 412 può avere un esito incerto.
+        await query.edit_message_text(
+            "⚠️ Non è stato possibile confermare "
+            "l'esito della cancellazione.\n\n"
+            "Controlla l'appuntamento su Google Calendar "
+            "prima di riprovare."
+        )
+        return
+
+    except ValueError as error:
+        await query.edit_message_text(
+            f"❌ Cancellazione bloccata.\n{error}"
+        )
+        return
+
+    except Exception as error:
+        print(
+            "Errore durante la cancellazione:",
+            type(error).__name__,
+        )
+
+        await query.edit_message_text(
+            "⚠️ Si è verificato un errore.\n"
+            "L'esito della cancellazione non è confermato.\n\n"
+            "Controlla Google Calendar prima di riprovare."
+        )
+        return
+
+    # Verifica finale: controlla che l'evento non sia più attivo.
+    try:
+        result = service.events().get(
+            calendarId=calendar_id,
+            eventId=event_id,
+        ).execute()
+
+    except HttpError as error:
+        if error.resp.status in (404, 410):
+            await query.edit_message_text(
+                "✅ Appuntamento cancellato correttamente "
+                "da Google Calendar."
+            )
+            return
+
+        await query.edit_message_text(
+            "⚠️ La richiesta di cancellazione è stata inviata, "
+            "ma non è stato possibile verificarne l'esito.\n\n"
+            "Controlla Google Calendar."
+        )
+        return
+
+    except Exception as error:
+        print(
+            "Errore durante la verifica della cancellazione:",
+            type(error).__name__,
+        )
+
+        await query.edit_message_text(
+            "⚠️ Impossibile verificare l'esito "
+            "della cancellazione.\n\n"
+            "Controlla Google Calendar."
+        )
+        return
+
+    if result.get("status") == "cancelled":
+        await query.edit_message_text(
+            "✅ Appuntamento cancellato correttamente "
+            "da Google Calendar."
+        )
+    else:
+        await query.edit_message_text(
+            "⚠️ L'appuntamento risulta ancora presente "
+            "su Google Calendar.\n\n"
+            "La cancellazione non è confermata."
+        )
+
+
 def main() -> None:
     print("AI Booking Manager — Telegram Bot")
     print("Avvio polling Telegram...")
@@ -621,6 +913,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("prenota", prenota))
     application.add_handler(CommandHandler("modifica", modifica))
+    application.add_handler(CommandHandler("cancella", cancella))
     application.add_handler(
         CallbackQueryHandler(
             handle_booking_callback,
@@ -631,6 +924,12 @@ def main() -> None:
         CallbackQueryHandler(
             handle_reschedule_callback,
             pattern=r"^reschedule_(confirm|cancel):[0-9a-f]{16}$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_delete_callback,
+            pattern=r"^delete_(confirm|cancel):[0-9a-f]{16}$",
         )
     )
     application.run_polling()
