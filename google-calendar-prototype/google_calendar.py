@@ -232,6 +232,7 @@ def update_booking(
     calendar_id: str,
     event_id: str,
     new_start: datetime,
+    expected_etag: str | None = None,
 ) -> dict:
     """
     Sposta un appuntamento esistente.
@@ -303,6 +304,14 @@ def update_booking(
         raise ValueError(
             "ETag mancante: modifica dell'appuntamento bloccata"
         )
+
+    # Verifica che l'evento sia ancora nella versione già controllata.
+    if expected_etag is not None:
+        if not expected_etag or etag != expected_etag:
+            raise ValueError(
+                "L'appuntamento è cambiato dopo la verifica iniziale. "
+                "Modifica bloccata."
+            )
 
     # Prepara la richiesta di modifica.
     request = service.events().patch(

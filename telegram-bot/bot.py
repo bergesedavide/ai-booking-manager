@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -335,6 +335,7 @@ async def modifica(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 calendar_id=CALENDAR_ID,
                 event_id=event_id,
                 new_start=new_start,
+                expected_etag=event["etag"],
             )
 
         except Exception as error:
@@ -375,7 +376,52 @@ async def modifica(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     elif availability == AvailabilityStatus.CONFLICT:
-        availability_message = "⚠️ Sovrapposizione con un altro appuntamento."
+        # Identificativo univoco della richiesta di modifica.
+        request_id = os.urandom(8).hex()
+
+        # Conserva la richiesta in attesa di conferma.
+        pending = context.user_data.setdefault(
+            "pending_reschedules",
+            {},
+        )
+
+        pending[request_id] = {
+            "event_id": event_id,
+            "new_start": new_start.isoformat(),
+            "expected_etag": event["etag"],
+            "calendar_id": CALENDAR_ID,
+        }
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ Conferma comunque",
+                    callback_data=f"reschedule_confirm:{request_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Annulla",
+                    callback_data=f"reschedule_cancel:{request_id}",
+                )
+            ],
+        ])
+
+        await message.reply_text(
+            "⚠️ Sovrapposizione rilevata!\n\n"
+            f"Titolo: {title}\n"
+            f"Google Event ID: {event_id}\n\n"
+            "Orario attuale:\n"
+            f"{original_start.strftime('%d/%m/%Y %H:%M')}"
+            " → "
+            f"{original_end.strftime('%H:%M')}\n\n"
+            "Nuovo orario richiesto:\n"
+            f"{new_start.strftime('%d/%m/%Y %H:%M')}\n\n"
+            "Vuoi modificare comunque l'appuntamento?",
+            reply_markup=keyboard,
+        )
+
+        return
 
     else:
         availability_message = (
@@ -399,6 +445,175 @@ async def modifica(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def handle_reschedule_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Gestisce provvisoriamente i pulsanti delle modifiche in conflitto."""
+
+    user = update.effective_user
+    query = update.callback_query
+
+    if user is None or query is None:
+        return
+
+    if user.id != ALLOWED_USER_ID:
+        await query.answer("Non autorizzato.", show_alert=True)
+        return
+
+    data = query.data or ""
+    action, separator, request_id = data.partition(":")
+
+    if (
+        not separator
+        or action not in ("reschedule_confirm", "reschedule_cancel")
+        or len(request_id) != 16
+    ):
+        await query.answer("Richiesta non valida.", show_alert=True)
+        return
+
+    pending = context.user_data.get("pending_reschedules", {})
+
+    if request_id not in pending:
+        await query.answer(
+            "Richiesta già gestita o non più disponibile.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    if action == "reschedule_cancel":
+        pending.pop(request_id, None)
+
+        await query.edit_message_text(
+            "❌ Modifica annullata.\n"
+            "Nessun appuntamento è stato modificato."
+        )
+        return
+
+    # Consuma la richiesta per impedire conferme ripetute.
+    request = pending.pop(request_id, None)
+
+    if request is None:
+        await query.edit_message_text(
+            "⚠️ Richiesta non più disponibile."
+        )
+        return
+
+    try:
+        event_id = request["event_id"]
+        new_start = datetime.fromisoformat(request["new_start"])
+        expected_etag = request["expected_etag"]
+
+        # Non consentire l'utilizzo di calendari diversi da quello configurato.
+        if request["calendar_id"] != CALENDAR_ID:
+            raise ValueError("Calendario della richiesta non valido.")
+
+        credentials = authenticate()
+        service = build(
+            "calendar",
+            "v3",
+            credentials=credentials,
+        )
+
+        # Recupera la versione corrente dell'appuntamento.
+        event = get_booking(
+            service=service,
+            calendar_id=CALENDAR_ID,
+            event_id=event_id,
+        )
+
+        # Blocca la modifica se l'appuntamento è cambiato.
+        if event.get("etag") != expected_etag:
+            await query.edit_message_text(
+                "⚠️ L'appuntamento è cambiato nel frattempo.\n"
+                "La modifica non è stata applicata.\n\n"
+                "Riprova il comando /modifica."
+            )
+            return
+
+        original_start = datetime.fromisoformat(
+            event["start"]["dateTime"]
+        )
+
+        original_end = datetime.fromisoformat(
+            event["end"]["dateTime"]
+        )
+
+        duration = (
+            original_end.astimezone(timezone.utc)
+            - original_start.astimezone(timezone.utc)
+        )
+
+        duration_minutes = int(duration.total_seconds() / 60)
+
+        availability = check_reschedule_availability_safe(
+            service=service,
+            calendar_id=CALENDAR_ID,
+            event_id=event_id,
+            new_start=new_start,
+            duration_minutes=duration_minutes,
+        )
+
+        if availability == AvailabilityStatus.UNKNOWN:
+            await query.edit_message_text(
+                "❌ Disponibilità non verificabile.\n"
+                "La modifica non è stata applicata.\n\n"
+                "Riprova il comando /modifica."
+            )
+            return
+
+        # AVAILABLE: modifica consentita.
+        # CONFLICT: modifica autorizzata esplicitamente dall'utente.
+        updated_event = update_booking(
+            service=service,
+            calendar_id=CALENDAR_ID,
+            event_id=event_id,
+            new_start=new_start,
+            expected_etag=expected_etag,
+        )
+
+        updated_start = datetime.fromisoformat(
+            updated_event["start"]["dateTime"]
+        ).astimezone(ZoneInfo("Europe/Rome"))
+
+        updated_end = datetime.fromisoformat(
+            updated_event["end"]["dateTime"]
+        ).astimezone(ZoneInfo("Europe/Rome"))
+
+        await query.edit_message_text(
+            "✅ Appuntamento modificato!\n\n"
+            f"Titolo: {updated_event.get('summary', 'Senza titolo')}\n"
+            f"Google Event ID: {event_id}\n\n"
+            "Nuovo orario:\n"
+            f"{updated_start.strftime('%d/%m/%Y %H:%M')}"
+            " → "
+            f"{updated_end.strftime('%H:%M')}"
+        )
+
+    except Exception as error:
+        from googleapiclient.errors import HttpError
+
+        if isinstance(error, HttpError) and error.resp.status == 412:
+            await query.edit_message_text(
+                "⚠️ L'appuntamento è stato modificato nel frattempo.\n"
+                "La modifica non è stata applicata.\n\n"
+                "Riprova il comando /modifica."
+            )
+        else:
+            print(
+                "Errore durante la conferma della modifica:",
+                type(error).__name__,
+                str(error),
+            )
+
+            await query.edit_message_text(
+                "❌ Non è stato possibile completare la modifica.\n"
+                "Controlla Google Calendar prima di riprovare."
+            )
+
+
 def main() -> None:
     print("AI Booking Manager — Telegram Bot")
     print("Avvio polling Telegram...")
@@ -410,6 +625,12 @@ def main() -> None:
         CallbackQueryHandler(
             handle_booking_callback,
             pattern=r"^booking_(confirm|cancel):[0-9a-f]{16}$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_reschedule_callback,
+            pattern=r"^reschedule_(confirm|cancel):[0-9a-f]{16}$",
         )
     )
     application.run_polling()

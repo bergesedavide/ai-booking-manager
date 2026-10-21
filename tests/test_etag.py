@@ -200,5 +200,55 @@ def main() -> None:
     print("Modifica reale verificata.")
 
 
+def test_expected_etag_mismatch(service, calendar_id: str) -> None:
+    """Verifica che update_booking blocchi un ETag non corrispondente."""
+
+    print("\n=== TEST 3: expected_etag errato ===")
+
+    before = get_event(service, calendar_id)
+    before_start, before_end = event_times(before)
+
+    if before.get("summary") != EXPECTED_TITLE:
+        raise RuntimeError("Evento di test inatteso")
+
+    if before_start != datetime(
+        2026, 10, 28, 14, 0,
+        tzinfo=ZoneInfo("Europe/Rome"),
+    ):
+        raise RuntimeError("Orario iniziale inatteso")
+
+    try:
+        update_booking(
+            service=service,
+            calendar_id=calendar_id,
+            event_id=EVENT_ID,
+            new_start=datetime(
+                2026, 10, 28, 16, 0,
+                tzinfo=ZoneInfo("Europe/Rome"),
+            ),
+            expected_etag='"etag-volutamente-errato"',
+        )
+    except ValueError as error:
+        if "L'appuntamento è cambiato" not in str(error):
+            raise
+
+        print("Modifica bloccata correttamente.")
+    else:
+        raise RuntimeError(
+            "ERRORE: update_booking ha accettato un ETag errato!"
+        )
+
+    after = get_event(service, calendar_id)
+    after_start, after_end = event_times(after)
+
+    if before_start != after_start or before_end != after_end:
+        raise RuntimeError(
+            "ERRORE: l'appuntamento è stato modificato!"
+        )
+
+    print("Evento invariato.")
+    print("✅ TEST 3 SUPERATO")
+
+
 if __name__ == "__main__":
     main()
