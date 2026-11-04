@@ -85,6 +85,7 @@ def create_booking(
     title: str,
     start: datetime,
     duration_minutes: int,
+    booking_id: str | None = None,
 ) -> dict:
     """Crea un appuntamento sul calendario Google di test."""
 
@@ -117,6 +118,18 @@ def create_booking(
             "timeZone": "Europe/Rome",
         },
     }
+
+    if booking_id is not None:
+        if not booking_id or any(
+            char not in "0123456789abcdefghijklmnopqrstuv"
+            for char in booking_id
+        ):
+            raise ValueError("Booking ID non valido")
+
+        if not 5 <= len(booking_id) <= 1024:
+            raise ValueError("Lunghezza Booking ID non valida")
+
+        event["id"] = booking_id
 
     return service.events().insert(
         calendarId=calendar_id,

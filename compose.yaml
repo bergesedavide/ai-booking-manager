@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:5433:5432"
+
+    environment:
+      POSTGRES_DB: ai_booking_manager
+      POSTGRES_USER: ai_booking
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD non configurata}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_booking -d ai_booking_manager"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:

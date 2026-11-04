@@ -2,6 +2,7 @@
 .venv/
 venv/
 __pycache__/
+.pytest_cache
 *.pyc
 
 # Credenziali Google
@@ -19,3 +20,18 @@ main_legacy.py
 .env
 .env.*
 !.env.example
+
+# Backup credenziali OAuth Google
+/google-calendar-prototype/token.json.backup-m064
+/google-calendar-prototype/token.json.old-m064
+
+# File temporanei
+/tmp/
+
+# Backup delle credenziali Google
+/google-calendar-prototype/token.json.*
+/google-calendar-prototype/credentials.json.*
+
+# Database e file locali
+*.sqlite3
+*.db

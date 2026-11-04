@@ -12,7 +12,16 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
+
+TELEGRAM_BOT_DIR = Path(__file__).resolve().parent
+
+if str(TELEGRAM_BOT_DIR) not in sys.path:
+    sys.path.insert(0, str(TELEGRAM_BOT_DIR))
+
+from ai_handler import handle_ai_message
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -31,7 +40,7 @@ from google_calendar import (
 )
 
 
-def load_config() -> tuple[str, int, str]:
+def load_config() -> tuple[str, int, str, str]:
     """Carica la configurazione locale senza dipendenze aggiuntive."""
     config: dict[str, str] = {}
 
@@ -52,10 +61,14 @@ def load_config() -> tuple[str, int, str]:
     if not calendar_id or calendar_id == "primary":
         raise ValueError("Calendario Google di test non configurato")
 
-    return token, int(allowed_id), calendar_id
+    postgres_password = config.get("POSTGRES_PASSWORD", "")
+    if not postgres_password:
+        raise ValueError("Password PostgreSQL non configurata")
+
+    return token, int(allowed_id), calendar_id, postgres_password
 
 
-BOT_TOKEN, ALLOWED_USER_ID, CALENDAR_ID = load_config()
+BOT_TOKEN, ALLOWED_USER_ID, CALENDAR_ID, POSTGRES_PASSWORD = load_config()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -932,6 +945,26 @@ def main() -> None:
             pattern=r"^delete_(confirm|cancel):[0-9a-f]{16}$",
         )
     )
+
+    async def ai_message_handler(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        await handle_ai_message(
+            update,
+            context,
+            ALLOWED_USER_ID,
+            CALENDAR_ID,
+            POSTGRES_PASSWORD,
+        )
+
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            ai_message_handler,
+        )
+    )
+    
     application.run_polling()
 
 
