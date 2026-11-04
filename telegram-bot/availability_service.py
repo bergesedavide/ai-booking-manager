@@ -72,7 +72,8 @@ def check_ai_availability(
 
     except Exception as error:
         print(
-            "Verifica disponibilità AI non riuscita: "
-            f"{type(error).__name__}"
+            "ERRORE GOOGLE CALENDAR - Disponibilità: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
         )
         return AvailabilityStatus.UNKNOWN

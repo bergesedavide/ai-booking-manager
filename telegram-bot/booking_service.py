@@ -1,7 +1,4 @@
-"""Servizio condiviso per la creazione degli appuntamenti.
-
-M06.5: verifica disponibilità e creazione su Google Calendar.
-"""
+"""Servizio per la creazione degli appuntamenti su Google Calendar."""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,6 +7,7 @@ from pathlib import Path
 import sys
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROTOTYPE_DIR = PROJECT_ROOT / "google-calendar-prototype"
@@ -18,7 +16,11 @@ if str(PROTOTYPE_DIR) not in sys.path:
     sys.path.insert(0, str(PROTOTYPE_DIR))
 
 from google_auth import authenticate
-from google_calendar import check_availability, create_booking
+from google_calendar import (
+    check_availability,
+    create_booking,
+    get_booking,
+)
 
 
 class BookingStatus(str, Enum):
@@ -39,36 +41,63 @@ def process_booking(
     start: datetime,
     duration_minutes: int,
     booking_id: str | None = None,
+    force_booking: bool = False,
 ) -> BookingResult:
-    """Verifica la disponibilità e crea l'evento soltanto se libero."""
+    """
+    Crea un appuntamento Google Calendar.
 
-    # Validazione prima di qualsiasi chiamata Google.
+    - Controlla la disponibilità, salvo conferma esplicita.
+    - Utilizza un ID evento preassegnato quando disponibile.
+    - Non ripete automaticamente una scrittura incerta.
+    """
+
     if not calendar_id or calendar_id == "primary":
         return BookingResult(BookingStatus.UNKNOWN)
 
-    if not title.strip():
+    if not title or not title.strip():
         return BookingResult(BookingStatus.UNKNOWN)
 
     if duration_minutes <= 0:
         return BookingResult(BookingStatus.UNKNOWN)
 
-    if start.tzinfo is None:
+    if not isinstance(start, datetime) or start.tzinfo is None:
         return BookingResult(BookingStatus.UNKNOWN)
+
+    if booking_id is not None:
+        if (
+            not 5 <= len(booking_id) <= 1024
+            or any(
+                char not in "0123456789abcdefghijklmnopqrstuv"
+                for char in booking_id
+            )
+        ):
+            return BookingResult(BookingStatus.UNKNOWN)
 
     try:
         credentials = authenticate()
         service = build("calendar", "v3", credentials=credentials)
 
-        available = check_availability(
-            service=service,
-            calendar_id=calendar_id,
-            start=start,
-            duration_minutes=duration_minutes,
+        if not force_booking:
+            available = check_availability(
+                service=service,
+                calendar_id=calendar_id,
+                start=start,
+                duration_minutes=duration_minutes,
+            )
+
+            if not available:
+                return BookingResult(BookingStatus.CONFLICT)
+
+    except Exception as error:
+        print(
+            "Errore verifica disponibilità: "
+            f"{type(error).__name__}"
         )
+        return BookingResult(BookingStatus.UNKNOWN)
 
-        if not available:
-            return BookingResult(BookingStatus.CONFLICT)
-
+    # Da questo punto può iniziare una scrittura Google.
+    # Non eseguire retry automatici della creazione.
+    try:
         event = create_booking(
             service=service,
             calendar_id=calendar_id,
@@ -90,7 +119,36 @@ def process_booking(
 
     except Exception as error:
         print(
-            "Errore durante la prenotazione: "
+            "Esito creazione Google incerto: "
             f"{type(error).__name__}"
         )
+
+        # Se conosciamo l'ID, possiamo verificare
+        # se Google abbia effettivamente creato l'evento.
+        if booking_id is not None:
+            try:
+                event = get_booking(
+                    service=service,
+                    calendar_id=calendar_id,
+                    event_id=booking_id,
+                )
+
+                if event.get("id") == booking_id:
+                    return BookingResult(
+                        status=BookingStatus.CREATED,
+                        event_id=booking_id,
+                    )
+
+            except HttpError as lookup_error:
+                print(
+                    "Verifica evento Google non conclusiva: "
+                    f"HTTP {lookup_error.resp.status}"
+                )
+
+            except Exception as lookup_error:
+                print(
+                    "Impossibile verificare l'evento: "
+                    f"{type(lookup_error).__name__}"
+                )
+
         return BookingResult(BookingStatus.UNKNOWN)

@@ -128,3 +128,47 @@ def get_booking_operation(
         return None
 
     return row[0], row[1]
+
+
+def mark_booking_failed(
+    connection: psycopg.Connection,
+    request_key: str,
+) -> bool:
+    """Registra un fallimento certo della prenotazione."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE booking_operations
+            SET status = 'FAILED',
+                updated_at = NOW()
+            WHERE request_key = %s
+              AND status = 'PENDING'
+            RETURNING id
+            """,
+            (request_key,),
+        )
+
+        return cursor.fetchone() is not None
+
+
+def mark_booking_unknown(
+    connection: psycopg.Connection,
+    request_key: str,
+) -> bool:
+    """Registra una prenotazione dall'esito incerto."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE booking_operations
+            SET status = 'UNKNOWN',
+                updated_at = NOW()
+            WHERE request_key = %s
+              AND status = 'PENDING'
+            RETURNING id
+            """,
+            (request_key,),
+        )
+
+        return cursor.fetchone() is not None

@@ -21,7 +21,7 @@ TELEGRAM_BOT_DIR = Path(__file__).resolve().parent
 if str(TELEGRAM_BOT_DIR) not in sys.path:
     sys.path.insert(0, str(TELEGRAM_BOT_DIR))
 
-from ai_handler import handle_ai_message
+from ai_handler import handle_ai_message, handle_ai_booking_callback
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -943,6 +943,24 @@ def main() -> None:
         CallbackQueryHandler(
             handle_delete_callback,
             pattern=r"^delete_(confirm|cancel):[0-9a-f]{16}$",
+        )
+    )
+
+    async def ai_booking_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        await handle_ai_booking_callback(
+            update,
+            context,
+            ALLOWED_USER_ID,
+            POSTGRES_PASSWORD,
+        )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            ai_booking_callback,
+            pattern=r"^ai_(confirm|cancel):[0-9a-f]{16}$",
         )
     )
 
