@@ -955,12 +955,13 @@ def main() -> None:
             context,
             ALLOWED_USER_ID,
             POSTGRES_PASSWORD,
+            CALENDAR_ID,
         )
 
     application.add_handler(
         CallbackQueryHandler(
             ai_booking_callback,
-            pattern=r"^ai_(confirm|cancel):[0-9a-f]{16}$",
+            pattern=r"^ai_(confirm|overlap|cancel):[0-9a-f]{16}$",
         )
     )
 

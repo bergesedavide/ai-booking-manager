@@ -7,6 +7,9 @@ import asyncio
 from pathlib import Path
 import sys
 import secrets
+import time
+from dataclasses import dataclass, replace
+
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -15,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from ai.schemas import AppointmentIntent
 from ai.conversation import ConversationManager
 from ai.interpreter import AppointmentInterpreter
 from ai.ollama_client import OllamaClient, OllamaError
@@ -37,7 +41,7 @@ from runtime_guard import OWNER_REF
 
 interpreter = AppointmentInterpreter(OllamaClient())
 
-conversations: dict[int, ConversationManager] = {}
+conversations: dict[tuple[int, int], ConversationManager] = {}
 conversation_locks = asyncio.Lock()
 
 async def handle_ai_message(
@@ -67,13 +71,16 @@ async def handle_ai_message(
     if await handle_move_reply(update, context, calendar_id, postgres_password):
         return
 
-    user_id = user.id
+    if await handle_pending_creation_reply(update, context):
+        return
+
+    conversation_key = (user.id, message.chat_id)
 
     request_key = f"ai:{message.chat_id}:{message.message_id}"
 
     async with conversation_locks:
         try:
-            manager = conversations.get(user_id)
+            manager = conversations.get(conversation_key)
 
             # Se esiste una conversazione, gestiamo la risposta.
             if manager is not None and manager.current_intent is not None:
@@ -87,7 +94,7 @@ async def handle_ai_message(
 
                 # L'utente ha annullato la conversazione.
                 if manager.current_intent is None:
-                    conversations.pop(user_id, None)
+                    conversations.pop(conversation_key, None)
                     await message.reply_text(
                         "❌ Conversazione annullata."
                     )
@@ -118,7 +125,7 @@ async def handle_ai_message(
                 )
 
                 manager.reset()
-                conversations.pop(user_id, None)
+                conversations.pop(conversation_key, None)
                 return
 
             # Nessuna conversazione attiva: interpretiamo il messaggio.
@@ -129,7 +136,7 @@ async def handle_ai_message(
 
             manager = ConversationManager()
             manager.start(intent, request_key)
-            conversations[user_id] = manager
+            conversations[conversation_key] = manager
 
             question = manager.next_question()
 
@@ -147,18 +154,18 @@ async def handle_ai_message(
             )
 
             manager.reset()
-            conversations.pop(user_id, None)
+            conversations.pop(conversation_key, None)
 
         except Exception as error:
             print(f"Errore agente AI: {type(error).__name__}: {error}")
 
             # Elimina eventuale stato conversazionale incompleto.
-            conversations.pop(user_id, None)
+            conversations.pop(conversation_key, None)
 
-            await message.reply_text(
-                "⚠️ Si è verificato un errore durante l'elaborazione AI.\n"
-                "La conversazione è stata interrotta.\n\n"
-                "Puoi inviare una nuova richiesta per ricominciare."
+            await deliver_creation_message(
+                message.reply_text,
+                "⚠️ Impossibile preparare la richiesta. Nessun tentativo automatico. "
+                "Se una precedente operazione è incerta, verificarne prima l’esito.",
             )
 
 
@@ -180,13 +187,14 @@ def format_intent_summary(intent) -> str:
         f"Durata: {duration}\n\n"
     )
 
-async def format_ai_result(
+async def _execute_confirmed_booking(
     intent,
     calendar_id: str,
     request_key: str,
     postgres_password: str,
-) -> str:
-    """Verifica la disponibilità e gestisce la creazione AI."""
+    allow_conflict: bool = False,
+) -> str | None:
+    """Execute a consumed plan; None requests overlap consent before registration."""
 
     if not request_key or not request_key.strip():
         raise ValueError("request_key AI mancante")
@@ -250,14 +258,10 @@ async def format_ai_result(
         calendar_id,
     )
 
-    if availability == AvailabilityStatus.CONFLICT:
-        return (
-            summary
-            + "\n❌ L'orario richiesto è occupato.\n"
-            "Nessun appuntamento creato."
-        )
+    if availability == AvailabilityStatus.CONFLICT and not allow_conflict:
+        return None  # No PENDING yet: require a fresh overlap token.
 
-    if availability != AvailabilityStatus.AVAILABLE:
+    if availability not in (AvailabilityStatus.AVAILABLE, AvailabilityStatus.CONFLICT):
         return (
             summary
             + "\n⚠️ Impossibile verificare la disponibilità.\n"
@@ -338,6 +342,7 @@ async def format_ai_result(
             start,
             intent.durata_minuti,
             google_event_id,
+            force_booking=allow_conflict,
             before_google_write=lambda: record_google_write_start(
                 postgres_password, request_key, google_event_id, calendar_id
             ),
@@ -413,7 +418,7 @@ async def format_ai_result(
         return (
             summary
             + "\n⚠️ Esito della prenotazione incerto.\n"
-            "Controlla Google Calendar prima di riprovare.\n"
+            "Verifica Google Calendar e PostgreSQL senza ripetere la prenotazione.\n"
             "Non verrà effettuato alcun tentativo automatico."
         )
 
@@ -506,232 +511,185 @@ async def send_ai_result(
         )
         return
 
-    # Non proporre nuove conferme per richieste già registrate.
+    await prepare_creation(update, context, intent, calendar_id, request_key, postgres_password)
+
+
+@dataclass(frozen=True)
+class CreationPlan:
+    intent: AppointmentIntent
+    request_key: str
+    user_id: int
+    chat_id: int
+    calendar_id: str
+    owner_ref: str
+    token: str
+    expires: float
+    phase: str = "confirm"
+
+
+async def deliver_creation_message(send, text, **kwargs):
+    """Transport errors must never change an operation result or trigger a write."""
+    try:
+        await send(text, **kwargs)
+        return True
+    except Exception:
+        print("Risposta Telegram non consegnata; nessun tentativo di scrittura ripetuto.")
+        return False
+
+
+def invalidate_creation(context, user_id, chat_id):
+    pending = context.user_data.setdefault("pending_ai_bookings", {})
+    for token, plan in list(pending.items()):
+        if isinstance(plan, CreationPlan) and (plan.user_id, plan.chat_id) == (user_id, chat_id):
+            pending.pop(token, None)
+
+
+async def handle_pending_creation_reply(update, context):
+    """Cancel a draft, or invalidate its buttons before interpreting a new plan."""
+    async with conversation_locks:
+        user_id, chat_id = update.effective_user.id, update.effective_message.chat_id
+        pending = context.user_data.get("pending_ai_bookings", {})
+        plans = [p for p in pending.values() if isinstance(p, CreationPlan)
+                 and (p.user_id, p.chat_id) == (user_id, chat_id)]
+        text = update.effective_message.text.strip().casefold().rstrip(".!?")
+        if not plans:
+            manager = conversations.get((user_id, chat_id))
+            if (text == "annulla prenotazione" and manager is not None
+                    and manager.current_intent is not None and manager.current_intent.operazione == "crea"):
+                manager.reset()
+                conversations.pop((user_id, chat_id), None)
+                await deliver_creation_message(update.effective_message.reply_text,
+                    "Prenotazione in preparazione annullata. Nessun appuntamento esistente cancellato.")
+                return True
+            return False
+        invalidate_creation(context, user_id, chat_id)
+        if text in ("annulla", "annulla tutto", "annulla prenotazione", "lascia perdere", "fermati"):
+            await deliver_creation_message(update.effective_message.reply_text,
+                "Prenotazione in preparazione annullata. Nessun appuntamento esistente cancellato.")
+            return True
+        # Any new text makes the old plan unusable. The existing interpreter then
+        # handles the new message, including an explicit request to delete an event.
+        return False
+
+
+async def format_ai_result(intent, calendar_id, request_key, postgres_password):
+    """Read-only view of an existing request. Never creates a booking."""
+    summary = format_intent_summary(intent)
+    if intent.operazione != "crea":
+        return summary
     with get_connection(postgres_password) as connection:
         existing = get_booking_operation(connection, request_key)
+    if existing is None:
+        return summary + "Conferma esplicita necessaria. Nessuna creazione avviata."
+    status, event_id = existing
+    detail = f" Evento Google: {event_id}." if status == "CREATED" and event_id else ""
+    return summary + f"Richiesta già registrata: {status}.{detail} Nessuna nuova creazione eseguita."
 
-    if existing is not None:
-        await message.reply_text(
-            await format_ai_result(
-                intent, calendar_id, request_key, postgres_password
-            )
-        )
-        return
 
-    availability = await asyncio.to_thread(
-        check_ai_availability,
-        intent,
-        calendar_id,
-    )
-
-    if availability != AvailabilityStatus.CONFLICT:
-        await message.reply_text(
-            await format_ai_result(
-                intent, calendar_id, request_key, postgres_password
-            )
-        )
-        return
-
-    # La richiesta è occupata: attendiamo una conferma esplicita.
-    confirmation_id = secrets.token_hex(8)
-
-    pending = context.user_data.setdefault(
-        "pending_ai_bookings", {}
-    )
-
-    pending[confirmation_id] = {
-        "intent": intent,
-        "request_key": request_key,
-        "calendar_id": calendar_id,
-    }
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "✅ Prenota comunque",
-                callback_data=f"ai_confirm:{confirmation_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ Annulla",
-                callback_data=f"ai_cancel:{confirmation_id}",
-            )
-        ],
+def creation_keyboard(plan):
+    action = "overlap" if plan.phase == "overlap" else "confirm"
+    label = "Conferma sovrapposizione" if action == "overlap" else "Conferma"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=f"ai_{action}:{plan.token}")],
+        [InlineKeyboardButton("Annulla", callback_data=f"ai_cancel:{plan.token}")],
     ])
 
-    await message.reply_text(
-        format_intent_summary(intent)
-        + "\n⚠️ L'orario richiesto è occupato.\n\n"
-        "Vuoi creare comunque un appuntamento sovrapposto?",
-        reply_markup=keyboard,
-    )
+
+async def prepare_creation(update, context, intent, calendar_id, request_key, postgres_password):
+    user_id, chat_id = update.effective_user.id, update.effective_message.chat_id
+    invalidate_creation(context, user_id, chat_id)
+    try:
+        if not calendar_id or calendar_id.strip().lower() == "primary" or not request_key:
+            raise ValueError("Contesto non valido")
+        with get_connection(postgres_password) as connection:
+            existing = get_booking_operation(connection, request_key)
+        if existing is not None:
+            result = await format_ai_result(intent, calendar_id, request_key, postgres_password)
+            await deliver_creation_message(update.effective_message.reply_text, result)
+            return
+        parse_ai_booking_start(intent)
+        if not intent.cliente or not intent.cliente.strip():
+            raise ValueError("Cliente mancante")
+        status = await asyncio.to_thread(check_ai_availability, intent, calendar_id)
+        if status not in (AvailabilityStatus.AVAILABLE, AvailabilityStatus.CONFLICT):
+            await deliver_creation_message(update.effective_message.reply_text,
+                "Disponibilità non verificabile. Nessuna creazione avviata.")
+            return
+        plan = CreationPlan(intent, request_key, user_id, chat_id, calendar_id, OWNER_REF,
+                            secrets.token_hex(8), time.monotonic() + 300)
+        context.user_data.setdefault("pending_ai_bookings", {})[plan.token] = plan
+        warning = "\n⚠️ Orario occupato: servirà una seconda conferma della sovrapposizione." if status == AvailabilityStatus.CONFLICT else ""
+        delivered = await deliver_creation_message(update.effective_message.reply_text,
+            format_intent_summary(intent) + "Vuoi creare questo appuntamento?" + warning,
+            reply_markup=creation_keyboard(plan))
+        if not delivered:
+            context.user_data["pending_ai_bookings"].pop(plan.token, None)
+    except Exception:
+        invalidate_creation(context, user_id, chat_id)
+        await deliver_creation_message(update.effective_message.reply_text,
+            "Impossibile preparare la prenotazione. Nessuna scrittura Google avviata.")
 
 
-async def handle_ai_booking_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    allowed_user_id: int,
-    postgres_password: str,
-) -> None:
-    """Gestisce la conferma esplicita di una prenotazione AI."""
-
-    query = update.callback_query
-    user = update.effective_user
-
+async def handle_ai_booking_callback(update, context, allowed_user_id, postgres_password, calendar_id):
+    query, user = update.callback_query, update.effective_user
     if query is None:
         return
-
     if user is None or user.id != allowed_user_id:
-        await query.answer("Non autorizzato.", show_alert=True)
+        await deliver_creation_message(query.answer, "Non autorizzato", show_alert=True)
         return
-
-    await query.answer()
-
-    try:
-        action, confirmation_id = (query.data or "").split(":", 1)
-    except ValueError:
-        await query.edit_message_text("❌ Conferma non valida.")
-        return
-
     async with conversation_locks:
-        pending = context.user_data.setdefault(
-            "pending_ai_bookings", {}
-        )
-
-        # La richiesta viene consumata una sola volta.
-        booking = pending.pop(confirmation_id, None)
-
-        if booking is None:
-            await query.edit_message_text(
-                "⚠️ Richiesta già gestita o non più disponibile."
-            )
+        parts = (query.data or "").split(":")
+        pending = context.user_data.setdefault("pending_ai_bookings", {})
+        plan = pending.get(parts[1]) if len(parts) == 2 else None
+        action = parts[0]
+        valid = (isinstance(plan, CreationPlan) and plan.token == parts[1]
+                 and plan.user_id == user.id and update.effective_chat is not None
+                 and plan.chat_id == update.effective_chat.id
+                 and plan.calendar_id == calendar_id and bool(calendar_id)
+                 and calendar_id.strip().lower() != "primary" and plan.owner_ref == OWNER_REF
+                 and plan.expires > time.monotonic()
+                 and (action == "ai_cancel" or (action, plan.phase) in
+                      (("ai_confirm", "confirm"), ("ai_overlap", "overlap"))))
+        if not valid:
+            await deliver_creation_message(query.answer,
+                "Conferma scaduta, già gestita o contesto non valido", show_alert=True)
             return
-
+        pending.pop(plan.token, None)  # Consume before external I/O.
+        await deliver_creation_message(query.answer, "")
         if action == "ai_cancel":
-            await query.edit_message_text(
-                "❌ Prenotazione annullata. Nessun evento creato."
-            )
+            await deliver_creation_message(query.edit_message_text,
+                "Prenotazione in preparazione annullata. Nessun appuntamento esistente cancellato.")
             return
-
-        if action != "ai_confirm":
-            await query.edit_message_text("❌ Operazione non valida.")
-            return
-
-        intent = booking["intent"]
-        request_key = booking["request_key"]
-        calendar_id = booking["calendar_id"]
-
-        if not calendar_id or calendar_id == "primary":
-            await query.edit_message_text(
-                "❌ Calendario di test non valido."
-            )
-            return
-
         try:
-            start = parse_ai_booking_start(intent)
-
-            if not intent.cliente or not intent.cliente.strip():
-                raise ValueError("Cliente mancante")
-
-            registration = await asyncio.to_thread(
-                register_ai_booking,
-                request_key,
-                postgres_password,
-                calendar_id,
-            )
-
-            if registration == RegistrationResult.ALREADY_EXISTS:
-                await query.edit_message_text(
-                    "⚠️ Richiesta già registrata. "
-                    "Nessuna nuova creazione eseguita."
-                )
-                return
-
             with get_connection(postgres_password) as connection:
-                operation = get_booking_operation(
-                    connection, request_key
-                )
+                existing = get_booking_operation(connection, plan.request_key)
+            if existing is not None:
+                result = await format_ai_result(plan.intent, calendar_id, plan.request_key, postgres_password)
+            else:
+                status = await asyncio.to_thread(check_ai_availability, plan.intent, calendar_id)
+                if status not in (AvailabilityStatus.AVAILABLE, AvailabilityStatus.CONFLICT):
+                    result = "Disponibilità non verificabile. Nessuna creazione avviata."
+                else:
+                    if status == AvailabilityStatus.CONFLICT and plan.phase == "confirm":
+                        result = None
+                    else:
+                        result = await _execute_confirmed_booking(plan.intent, calendar_id,
+                            plan.request_key, postgres_password, allow_conflict=plan.phase == "overlap")
+                    if result is None:
+                        overlap = replace(plan, token=secrets.token_hex(8), expires=time.monotonic()+300, phase="overlap")
+                        pending[overlap.token] = overlap
+                        delivered = await deliver_creation_message(query.edit_message_text,
+                            format_intent_summary(plan.intent) + "⚠️ Sovrapposizione rilevata. Autorizzi esplicitamente la creazione sovrapposta?",
+                            reply_markup=creation_keyboard(overlap))
+                        if not delivered:
+                            pending.pop(overlap.token, None)
+                        return
+        except Exception:
+            result = ("Esito della prenotazione non confermato. Verificare Google Calendar e PostgreSQL; "
+                      "non ripetere la richiesta. Nessun tentativo automatico.")
+        # Delivery happens after all operation-state decisions, outside their error handler.
+        await deliver_creation_message(query.edit_message_text, result)
 
-            if (
-                operation is None
-                or operation[0] != "PENDING"
-                or not operation[1]
-            ):
-                raise RuntimeError(
-                    "Operazione PostgreSQL non valida"
-                )
-
-            google_event_id = operation[1]
-
-            # La conferma esplicita permette la sovrapposizione.
-            result = await asyncio.to_thread(
-                process_booking,
-                calendar_id,
-                f"Allenamento - {intent.cliente}",
-                start,
-                intent.durata_minuti,
-                google_event_id,
-                True,
-                before_google_write=lambda: record_google_write_start(
-                    postgres_password, request_key, google_event_id, calendar_id
-                ),
-            )
-
-            if (
-                result.status == BookingStatus.CREATED
-                and result.event_id == google_event_id
-            ):
-                with get_connection(postgres_password) as connection:
-                    saved = mark_booking_created(
-                        connection,
-                        request_key,
-                        google_event_id,
-                    )
-
-                if not saved:
-                    raise RuntimeError(
-                        "Impossibile salvare lo stato CREATED"
-                    )
-
-                await query.edit_message_text(
-                    "✅ Appuntamento creato su Google Calendar!\n\n"
-                    f"Cliente: {intent.cliente}\n"
-                    f"Data: {intent.data}\n"
-                    f"Orario: {intent.ora}\n"
-                    f"Google Event ID: {google_event_id}"
-                )
-                return
-
-            # Qualsiasi risultato non confermato viene trattato
-            # conservativamente come UNKNOWN.
-            with get_connection(postgres_password) as connection:
-                saved = mark_booking_unknown(
-                    connection,
-                    request_key,
-                )
-
-            if not saved:
-                raise RuntimeError(
-                    "Impossibile salvare lo stato UNKNOWN"
-                )
-
-            await query.edit_message_text(
-                "⚠️ Esito della prenotazione incerto.\n"
-                "Controlla Google Calendar prima di riprovare."
-            )
-
-        except Exception as error:
-            print(
-                "Errore conferma prenotazione AI: "
-                f"{type(error).__name__}"
-            )
-
-            await query.edit_message_text(
-                "⚠️ Prenotazione non confermata.\n"
-                "Verifica Google Calendar e PostgreSQL.\n"
-                "Nessun nuovo tentativo automatico."
-            )
 
 def record_google_write_start(password, request_key, event_id, calendar_id):
     """Commit the write boundary; failure prevents any Google insert."""
