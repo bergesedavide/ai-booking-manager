@@ -106,6 +106,14 @@ biguous_duration = re.search(
 """
 
 
+class ModelResponseError(ValueError):
+    """Model output could not be interpreted; never includes its contents."""
+
+
+class UnknownIntentError(ModelResponseError):
+    """Model output does not identify a supported operation."""
+
+
 class AppointmentInterpreter:
     """Interpreta richieste di appuntamenti utilizzando Ollama."""
 
@@ -127,12 +135,15 @@ class AppointmentInterpreter:
 
         try:
             data = json.loads(response)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Il modello AI ha restituito un JSON non valido."
-            ) from exc
+        except json.JSONDecodeError:
+            raise ModelResponseError("Risposta AI non valida") from None
 
-        intent = validate_appointment_intent(data)
+        if isinstance(data, dict) and data.get("operazione") not in ("crea", "modifica", "cancella"):
+            raise UnknownIntentError("Operazione AI non riconosciuta")
+        try:
+            intent = validate_appointment_intent(data)
+        except ValueError:
+            raise ModelResponseError("Risposta AI non valida") from None
         if intent.operazione == "crea":
             ambiguous_duration = re.search(
                 r"\b(?:oppure|o in alternativa|o|massimo|al massimo)\b",
@@ -153,10 +164,13 @@ class AppointmentInterpreter:
 
         reference_date = datetime.now(ROME_TIMEZONE).date()
 
-        return replace(
-            intent,
-            data=normalize_relative_date(intent.data, reference_date),
-            data_originale=normalize_relative_date(
-                intent.data_originale, reference_date
-            ),
-        )
+        try:
+            return replace(
+                intent,
+                data=normalize_relative_date(intent.data, reference_date),
+                data_originale=normalize_relative_date(
+                    intent.data_originale, reference_date
+                ),
+            )
+        except ValueError:
+            raise ModelResponseError("Risposta AI non valida") from None

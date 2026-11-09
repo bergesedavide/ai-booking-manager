@@ -1,8 +1,21 @@
+from enum import Enum
+
 import httpx
 
 
+class OllamaErrorKind(str, Enum):
+    CONNECTION = "connection"
+    TIMEOUT = "timeout"
+    HTTP = "http"
+    INVALID_RESPONSE = "invalid_response"
+
+
 class OllamaError(Exception):
-    """Errore durante la comunicazione con Ollama."""
+    """Categorized error without request or response contents."""
+
+    def __init__(self, kind: OllamaErrorKind):
+        self.kind = kind
+        super().__init__(kind.value)
 
 
 class OllamaClient:
@@ -16,7 +29,7 @@ class OllamaClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.timeout = timeout
+        self.timeout = httpx.Timeout(timeout, connect=5.0)
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         """Invia una conversazione a Ollama e restituisce il testo generato."""
@@ -35,27 +48,25 @@ class OllamaClient:
                 f"{self.base_url}/api/chat",
                 json=payload,
                 timeout=self.timeout,
+                follow_redirects=False,
             )
             response.raise_for_status()
 
             data = response.json()
-            content = data["message"]["content"]
-
-            if not isinstance(content, str):
-                raise OllamaError("Risposta di Ollama non valida.")
+            if (not isinstance(data, dict) or data.get("done") is not True
+                    or not isinstance(data.get("message"), dict)):
+                raise OllamaError(OllamaErrorKind.INVALID_RESPONSE)
+            content = data["message"].get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise OllamaError(OllamaErrorKind.INVALID_RESPONSE)
 
             return content
 
-        except httpx.TimeoutException as exc:
-            raise OllamaError("Timeout durante la richiesta a Ollama.") from exc
-
-        except httpx.RequestError as exc:
-            raise OllamaError("Impossibile comunicare con Ollama.") from exc
-
-        except httpx.HTTPStatusError as exc:
-            raise OllamaError(
-                f"Ollama ha restituito HTTP {exc.response.status_code}."
-            ) from exc
-
-        except (KeyError, TypeError, ValueError) as exc:
-            raise OllamaError("Formato della risposta di Ollama non valido.") from exc
+        except httpx.TimeoutException:
+            raise OllamaError(OllamaErrorKind.TIMEOUT) from None
+        except httpx.RequestError:
+            raise OllamaError(OllamaErrorKind.CONNECTION) from None
+        except httpx.HTTPStatusError:
+            raise OllamaError(OllamaErrorKind.HTTP) from None
+        except (KeyError, TypeError, ValueError):
+            raise OllamaError(OllamaErrorKind.INVALID_RESPONSE) from None

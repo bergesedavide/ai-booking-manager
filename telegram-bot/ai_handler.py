@@ -20,8 +20,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ai.schemas import AppointmentIntent
 from ai.conversation import ConversationManager
-from ai.interpreter import AppointmentInterpreter
-from ai.ollama_client import OllamaClient, OllamaError
+from ai.interpreter import AppointmentInterpreter, ModelResponseError, UnknownIntentError
+from ai.ollama_client import OllamaClient, OllamaError, OllamaErrorKind
 from ai.intent_checks import missing_creation_fields
 from availability_service import check_ai_availability, AvailabilityStatus
 from booking_service import BookingStatus, process_booking
@@ -45,6 +45,34 @@ interpreter = AppointmentInterpreter(OllamaClient())
 
 conversations: dict[tuple[int, int], ConversationManager] = {}
 conversation_locks = asyncio.Lock()
+
+async def infer_or_report(send, conversation_key, function, *args):
+    """Classify only failures from the inference phase, never booking failures."""
+    try:
+        return True, await await_worker(function, *args)
+    except asyncio.CancelledError:
+        conversations.pop(conversation_key, None)
+        raise
+    except (OllamaError, ModelResponseError) as error:
+        conversations.pop(conversation_key, None)
+        if isinstance(error, OllamaError):
+            category = error.kind.value
+            text = {
+                OllamaErrorKind.CONNECTION: "L'assistente non è disponibile. Nessuna operazione avviata.",
+                OllamaErrorKind.TIMEOUT: "L'assistente sta impiegando troppo tempo. Nessuna operazione avviata.",
+                OllamaErrorKind.HTTP: "L'assistente non riesce a rispondere. Nessuna operazione avviata.",
+                OllamaErrorKind.INVALID_RESPONSE: "Non sono riuscito a interpretare la richiesta. Prova a riformularla.",
+            }[error.kind]
+        elif isinstance(error, UnknownIntentError):
+            category = "unknown_intent"
+            text = "Non ho riconosciuto l'operazione. Specifica se vuoi prenotare, spostare o cancellare."
+        else:
+            category = "invalid_response"
+            text = "Non sono riuscito a interpretare la richiesta. Prova a riformularla."
+        print(f"Errore inferenza AI: {category}")
+        await deliver_creation_message(send, text)
+        return False, None
+
 
 async def handle_ai_message(
     update: Update,
@@ -87,12 +115,15 @@ async def handle_ai_message(
             # Se esiste una conversazione, gestiamo la risposta.
             if manager is not None and manager.current_intent is not None:
 
-                handled = await asyncio.to_thread(
-                    manager.handle_reply,
+                ok, handled = await infer_or_report(
+                    message.reply_text, conversation_key, manager.handle_reply,
                     message.text,
                     interpreter,
                     request_key,
                 )
+
+                if not ok:
+                    return
 
                 # L'utente ha annullato la conversazione.
                 if manager.current_intent is None:
@@ -130,10 +161,11 @@ async def handle_ai_message(
                 return
 
             # Nessuna conversazione attiva: interpretiamo il messaggio.
-            intent = await asyncio.to_thread(
-                interpreter.interpret,
-                message.text,
+            ok, intent = await infer_or_report(
+                message.reply_text, conversation_key, interpreter.interpret, message.text,
             )
+            if not ok:
+                return
 
             manager = ConversationManager()
             manager.start(intent, request_key)
@@ -159,7 +191,7 @@ async def handle_ai_message(
             conversations.pop(conversation_key, None)
 
         except Exception as error:
-            print(f"Errore agente AI: {type(error).__name__}: {error}")
+            print(f"Errore agente AI: {type(error).__name__}")
 
             # Elimina eventuale stato conversazionale incompleto.
             conversations.pop(conversation_key, None)
