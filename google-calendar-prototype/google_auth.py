@@ -18,6 +18,11 @@ SCOPES = [
 
 
 def authenticate() -> Credentials:
+    """Manual authorization only; never use from the running Telegram bot.
+
+    May open an OAuth browser/server and persist token.json. Bot runtime must
+    use google_transport.load_existing_credentials instead.
+    """
     credentials = None
 
     if TOKEN_FILE.exists():

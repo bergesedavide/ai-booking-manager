@@ -28,7 +28,7 @@ ENV_FILE = PROJECT_ROOT / ".env"
 PROTOTYPE_DIR = PROJECT_ROOT / "google-calendar-prototype"
 sys.path.insert(0, str(PROTOTYPE_DIR))
 
-from google_auth import authenticate
+from google_transport import load_existing_credentials as authenticate
 from google_calendar import (
     AvailabilityStatus,
     check_availability,
