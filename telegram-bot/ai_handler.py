@@ -59,6 +59,10 @@ async def handle_ai_message(
         print("Tentativo di accesso AI non autorizzato.")
         return
 
+    from ai_deletion_handler import handle_reply as handle_delete_reply
+    if await handle_delete_reply(update, context, calendar_id, postgres_password):
+        return
+
     from ai_reschedule_handler import handle_reply as handle_move_reply
     if await handle_move_reply(update, context, calendar_id, postgres_password):
         return
@@ -481,6 +485,11 @@ async def send_ai_result(
     message = update.effective_message
 
     if message is None:
+        return
+
+    if intent.operazione == "cancella":
+        from ai_deletion_handler import begin
+        await begin(update, context, intent, request_key, calendar_id, postgres_password)
         return
 
     if intent.operazione == "modifica":

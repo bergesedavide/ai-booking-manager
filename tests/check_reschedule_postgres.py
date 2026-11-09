@@ -13,7 +13,7 @@ from reschedule_repository import RescheduleRepository
 
 class MoveCursor(TemporaryCursor):
     def execute(self, sql, params=None):
-        return self.cursor.execute(sql.replace('public.booking_operations','pg_temp.booking_operations').replace('public.booking_reschedules','pg_temp.booking_reschedules'),params)
+        return self.cursor.execute(sql.replace('public.booking_operations','pg_temp.booking_operations').replace('public.booking_reschedules','pg_temp.booking_reschedules').replace('public.booking_deletions','pg_temp.booking_deletions'),params)
 class MoveConnection(TemporaryConnection):
     def cursor(self):return MoveCursor(self.connection.cursor())
 
@@ -32,6 +32,9 @@ def main():
             migration=(root/'migrations/0067_reschedules.sql').read_text()
             migration=migration.replace('BEGIN;','').replace('COMMIT;','').replace('CREATE TABLE public.booking_reschedules','CREATE TEMP TABLE booking_reschedules').replace('REFERENCES public.booking_operations','REFERENCES pg_temp.booking_operations').replace('ON public.booking_reschedules','ON pg_temp.booking_reschedules')
             cursor.execute(migration)
+            deletion=(root/'migrations/0068_deletions.sql').read_text()
+            deletion=deletion.replace('BEGIN;','').replace('COMMIT;','').replace('CREATE TABLE public.booking_deletions','CREATE TEMP TABLE booking_deletions').replace('REFERENCES public.booking_operations','REFERENCES pg_temp.booking_operations').replace('ON public.booking_deletions','ON pg_temp.booking_deletions')
+            cursor.execute(deletion)
             cursor.execute("INSERT INTO pg_temp.booking_operations (request_key,google_event_id,status,execution_version,calendar_id,owner_ref,google_write_started_at) VALUES ('fixture',%s,'CREATED',2,'test-calendar','owner',NOW())",(PLAN.event_id,))
         @contextmanager
         def isolated(_):

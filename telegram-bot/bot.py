@@ -972,6 +972,14 @@ def main() -> None:
         ai_move_callback, pattern=r"^aimove:(select|confirm|overlap|cancel):[0-9a-f]{16}:[0-9]+$"
     ))
 
+    async def ai_delete_callback(update, context):
+        from ai_deletion_handler import callback
+        await callback(update, context, ALLOWED_USER_ID, CALENDAR_ID, POSTGRES_PASSWORD)
+
+    application.add_handler(CallbackQueryHandler(
+        ai_delete_callback, pattern=r"^aidelete:(select|confirm|cancel):[0-9a-f]{16}:[0-9]+$"
+    ))
+
     async def ai_message_handler(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,

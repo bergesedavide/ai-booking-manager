@@ -1,5 +1,6 @@
 """Separate modification journal; never changes booking_operations."""
 from database import get_connection
+from event_operation_guard import lock_owned_event, blocked
 
 
 class RescheduleRepository:
@@ -19,9 +20,13 @@ class RescheduleRepository:
                 return row[0] if row else None
 
     def register(self, plan):
-        # Recheck provenance within INSERT. Commit before any Google write.
+        # Serialize registration with deletions; release lock before Google I/O.
         with get_connection(self.password) as connection:
             with connection.cursor() as cursor:
+                if not lock_owned_event(cursor, plan.event_id, self.calendar_id, self.owner_ref):
+                    return None
+                if blocked(cursor, plan.event_id, self.calendar_id, self.owner_ref):
+                    return None
                 cursor.execute(
                     "INSERT INTO public.booking_reschedules (booking_operation_id, request_key, "
                     "owner_ref, calendar_id, google_event_id, expected_etag, original_start, "
