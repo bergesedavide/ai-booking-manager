@@ -1,6 +1,7 @@
 """AI move conversation. Server-side plans, expiring single-use callbacks."""
 import asyncio
 from worker_guard import await_worker
+from telegram_delivery import deliver, deliver_session
 from dataclasses import replace
 import secrets
 import time
@@ -45,7 +46,7 @@ async def begin(update, context, intent, request_key, calendar_id, password):
     async with LOCK:
         context.user_data.pop('ai_move', None)
         if intent.durata_minuti is not None:
-            await update.effective_message.reply_text('M06.7 sposta soltanto data e ora. Non specificare una nuova durata; titolo e durata restano invariati.')
+            await deliver(update.effective_message.reply_text, 'M06.7 sposta soltanto data e ora. Non specificare una nuova durata; titolo e durata restano invariati.')
             return
         session = dict(intent=intent, request_key=request_key, user_id=update.effective_user.id,
                        chat_id=update.effective_chat.id, calendar_id=calendar_id, owner_ref=OWNER_REF,
@@ -59,7 +60,7 @@ async def advance(update, context, session, password):
     field = missing(session['intent'])
     if field:
         session['field'] = field
-        await update.effective_message.reply_text(QUESTIONS[field])
+        await deliver_session(context, 'ai_move', session, update.effective_message.reply_text, QUESTIONS[field])
         return
     try:
         repo = RescheduleRepository(password, session['calendar_id'], OWNER_REF)
@@ -67,24 +68,26 @@ async def advance(update, context, session, password):
         found = await asyncio.to_thread(candidates, service, repo, session['intent'], session['calendar_id'], OWNER_REF)
         if not found:
             context.user_data.pop('ai_move', None)
-            await update.effective_message.reply_text('Nessun appuntamento verificabile del prototipo corrisponde. Controlla cliente e collocazione originale e invia una nuova richiesta.')
+            await deliver(update.effective_message.reply_text, 'Nessun appuntamento verificabile del prototipo corrisponde. Controlla cliente e collocazione originale e invia una nuova richiesta.')
             return
         if len(found) > 20:
             context.user_data.pop('ai_move', None)
-            await update.effective_message.reply_text('Troppi risultati. Specifica anche l’orario originale in una nuova richiesta.')
+            await deliver(update.effective_message.reply_text, 'Troppi risultati. Specifica anche l’orario originale in una nuova richiesta.')
             return
         if len(found) == 1:
-            await show_plan(update.effective_message.reply_text, session, service, repo, found[0]['id'])
+            if not await show_plan(update.effective_message.reply_text, session, service, repo, found[0]['id']):
+                if context.user_data.get('ai_move') is session:
+                    context.user_data.pop('ai_move', None)
         else:
             session['stage'] = 'select'
             session['ids'] = [event['id'] for event in found]
             renew(session)
             choices = [(f"{event.get('summary','')} — {event['start']['dateTime']}", f"aimove:select:{session['token']}:{i}") for i,event in enumerate(found)]
             choices.append(('Annulla', f"aimove:cancel:{session['token']}:0"))
-            await update.effective_message.reply_text('Quale appuntamento vuoi spostare?', reply_markup=keyboard(choices))
+            await deliver_session(context, 'ai_move', session, update.effective_message.reply_text, 'Quale appuntamento vuoi spostare?', reply_markup=keyboard(choices))
     except Exception:
         context.user_data.pop('ai_move', None)
-        await update.effective_message.reply_text('Verifica non riuscita. Nessuna modifica avviata; richiesta interrotta.')
+        await deliver(update.effective_message.reply_text, 'Verifica non riuscita. Nessuna modifica avviata; richiesta interrotta.')
 
 
 async def show_plan(send, session, service, repo, event_id):
@@ -97,7 +100,7 @@ async def show_plan(send, session, service, repo, event_id):
     renew(session)
     def fmt(value): return value.astimezone(ROME).strftime('%d/%m/%Y %H:%M')
     warning = '\n⚠️ Sovrapposizione rilevata: servirà una conferma aggiuntiva.' if status == AvailabilityStatus.CONFLICT else ''
-    await send(f"Spostamento: {plan.title}\nAttuale: {fmt(plan.old_start)} → {fmt(plan.old_end)}\nNuovo: {fmt(plan.new_start)} → {fmt(plan.new_end)}\nTitolo e durata invariati.{warning}",
+    return await deliver(send, f"Spostamento: {plan.title}\nAttuale: {fmt(plan.old_start)} → {fmt(plan.old_end)}\nNuovo: {fmt(plan.new_start)} → {fmt(plan.new_end)}\nTitolo e durata invariati.{warning}",
         reply_markup=keyboard([('Conferma spostamento', f"aimove:confirm:{session['token']}:0"), ('Annulla', f"aimove:cancel:{session['token']}:0")]))
 
 
@@ -109,15 +112,15 @@ async def handle_reply(update, context, calendar_id, password):
             return False
         if not same_context(session, update, calendar_id):
             context.user_data.pop('ai_move',None)
-            await update.effective_message.reply_text('Richiesta scaduta o contesto cambiato. Invia una nuova richiesta.')
+            await deliver(update.effective_message.reply_text, 'Richiesta scaduta o contesto cambiato. Invia una nuova richiesta.')
             return True
         text = update.effective_message.text.strip()
         if text.casefold().rstrip('.!?') in ('annulla','annulla tutto','lascia perdere','fermati'):
             context.user_data.pop('ai_move',None)
-            await update.effective_message.reply_text('Spostamento annullato. Nessuna modifica eseguita.')
+            await deliver(update.effective_message.reply_text, 'Spostamento annullato. Nessuna modifica eseguita.')
             return True
         if session['stage'] != 'collect':
-            await update.effective_message.reply_text('Usa i pulsanti della richiesta oppure scrivi “annulla”.')
+            await deliver(update.effective_message.reply_text, 'Usa i pulsanti della richiesta oppure scrivi “annulla”.')
             return True
         field = session['field']
         try:
@@ -131,7 +134,7 @@ async def handle_reply(update, context, calendar_id, password):
                 value = text
             session['intent'] = replace(session['intent'], **{field:value})
         except ValueError:
-            await update.effective_message.reply_text(QUESTIONS[field])
+            await deliver_session(context, 'ai_move', session, update.effective_message.reply_text, QUESTIONS[field])
             return True
         renew(session)
         await advance(update, context, session, password)
@@ -141,41 +144,41 @@ async def handle_reply(update, context, calendar_id, password):
 async def callback(update, context, allowed_user_id, calendar_id, password):
     query = update.callback_query
     if query is None or update.effective_user is None or update.effective_user.id != allowed_user_id:
-        if query: await query.answer('Non autorizzato', show_alert=True)
+        if query: await deliver(query.answer, 'Non autorizzato', show_alert=True)
         return
     async with LOCK:
         session = context.user_data.get('ai_move')
         parts = (query.data or '').split(':')
         if len(parts)!=4 or parts[0]!='aimove' or not session or not same_context(session,update,calendar_id) or parts[2]!=session['token']:
-            await query.answer('Richiesta scaduta o già gestita', show_alert=True)
+            await deliver(query.answer, 'Richiesta scaduta o già gestita', show_alert=True)
             return
         action=parts[1]
         if action == 'cancel':
             context.user_data.pop('ai_move',None)
-            await query.answer()
-            await query.edit_message_text('Spostamento annullato. Nessuna modifica eseguita.')
+            await deliver(query.answer)
+            await deliver(query.edit_message_text, 'Spostamento annullato. Nessuna modifica eseguita.')
             return
         if (action,session['stage']) not in (('select','select'),('confirm','confirm'),('overlap','overlap')):
-            await query.answer('Azione non valida',show_alert=True)
+            await deliver(query.answer, 'Azione non valida',show_alert=True)
             return
         # Consume before any await/network operation. No replay on failure.
         context.user_data.pop('ai_move',None)
-        await query.answer()
+        await deliver(query.answer)
         try:
             repo=RescheduleRepository(password,calendar_id,OWNER_REF)
             service=await asyncio.to_thread(google_service)
             if action=='select':
                 index=int(parts[3])
                 if not 0 <= index < len(session['ids']): raise ValueError()
-                await show_plan(query.edit_message_text,session,service,repo,session['ids'][index])
-                context.user_data['ai_move']=session
+                if await show_plan(query.edit_message_text,session,service,repo,session['ids'][index]):
+                    context.user_data['ai_move']=session
                 return
             result=await await_worker(execute,service,repo,session['plan'],calendar_id,OWNER_REF,action=='overlap')
             if result=='CONFLICT':
                 session['stage']='overlap'
                 renew(session)
                 context.user_data['ai_move']=session
-                await query.edit_message_text('Conflitto confermato dal controllo attuale. Autorizzi esplicitamente la sovrapposizione?',reply_markup=keyboard([
+                await deliver_session(context, 'ai_move', session, query.edit_message_text, 'Conflitto confermato dal controllo attuale. Autorizzi esplicitamente la sovrapposizione?',reply_markup=keyboard([
                     ('Conferma sovrapposizione',f"aimove:overlap:{session['token']}:0"),
                     ('Annulla',f"aimove:cancel:{session['token']}:0")]))
                 return
@@ -187,7 +190,8 @@ async def callback(update, context, allowed_user_id, calendar_id, password):
                 'REJECTED':'Appartenenza o contesto non verificabili. Nessuna modifica avviata.',
                 'UNKNOWN':'Esito incerto. Verificare Google e PostgreSQL; non ripetere automaticamente.',
             }
-            await query.edit_message_text(messages[result])
+            final_message = messages[result]
         except Exception:
             context.user_data.pop('ai_move',None)
-            await query.edit_message_text('Operazione interrotta o non confermata. Verificare Google e PostgreSQL prima di riprovare. Nessun tentativo automatico.')
+            final_message = 'Operazione interrotta o non confermata. Verificare Google e PostgreSQL prima di riprovare. Nessun tentativo automatico.'
+        await deliver(query.edit_message_text, final_message)

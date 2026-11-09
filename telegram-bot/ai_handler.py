@@ -37,6 +37,7 @@ from booking_datetime import parse_ai_booking_start
 from booking_repository import mark_booking_created
 from database import get_connection
 from worker_guard import await_worker
+from telegram_delivery import deliver as deliver_creation_message
 from runtime_guard import OWNER_REF
 
 
@@ -96,22 +97,21 @@ async def handle_ai_message(
                 # L'utente ha annullato la conversazione.
                 if manager.current_intent is None:
                     conversations.pop(conversation_key, None)
-                    await message.reply_text(
-                        "❌ Conversazione annullata."
-                    )
+                    await deliver_creation_message(message.reply_text, "❌ Conversazione annullata.")
                     return
 
                 if not handled:
-                    await message.reply_text(
+                    if not await deliver_creation_message(message.reply_text,
                         "⚠️ Non ho capito la risposta.\n"
-                        f"{manager.next_question() or 'Riformula la richiesta.'}"
-                    )
+                        f"{manager.next_question() or 'Riformula la richiesta.'}"):
+                        conversations.pop(conversation_key, None)
                     return
 
                 question = manager.next_question()
 
                 if question is not None:
-                    await message.reply_text(question)
+                    if not await deliver_creation_message(message.reply_text, question):
+                        conversations.pop(conversation_key, None)
                     return
 
                 intent = manager.current_intent
@@ -142,7 +142,8 @@ async def handle_ai_message(
             question = manager.next_question()
 
             if question is not None:
-                await message.reply_text(question)
+                if not await deliver_creation_message(message.reply_text, question):
+                    conversations.pop(conversation_key, None)
                 return
 
             await send_ai_result(
@@ -496,7 +497,7 @@ async def send_ai_result(
 
     # Le operazioni non di creazione seguono il flusso esistente.
     if intent.operazione != "crea":
-        await message.reply_text(
+        await deliver_creation_message(message.reply_text,
             await format_ai_result(
                 intent, calendar_id, request_key, postgres_password
             )
@@ -518,15 +519,6 @@ class CreationPlan:
     expires: float
     phase: str = "confirm"
 
-
-async def deliver_creation_message(send, text, **kwargs):
-    """Transport errors must never change an operation result or trigger a write."""
-    try:
-        await send(text, **kwargs)
-        return True
-    except Exception:
-        print("Risposta Telegram non consegnata; nessun tentativo di scrittura ripetuto.")
-        return False
 
 
 def invalidate_creation(context, user_id, chat_id):
