@@ -1,5 +1,6 @@
 """AI move conversation. Server-side plans, expiring single-use callbacks."""
 import asyncio
+from worker_guard import await_worker
 from dataclasses import replace
 import secrets
 import time
@@ -169,7 +170,7 @@ async def callback(update, context, allowed_user_id, calendar_id, password):
                 await show_plan(query.edit_message_text,session,service,repo,session['ids'][index])
                 context.user_data['ai_move']=session
                 return
-            result=await asyncio.to_thread(execute,service,repo,session['plan'],calendar_id,OWNER_REF,action=='overlap')
+            result=await await_worker(execute,service,repo,session['plan'],calendar_id,OWNER_REF,action=='overlap')
             if result=='CONFLICT':
                 session['stage']='overlap'
                 renew(session)

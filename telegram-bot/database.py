@@ -16,4 +16,5 @@ def get_connection(password: str) -> psycopg.Connection:
         user="ai_booking",
         password=password,
         connect_timeout=5,
+        options="-c statement_timeout=10000 -c lock_timeout=3000",
     )

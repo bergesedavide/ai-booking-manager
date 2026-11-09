@@ -36,6 +36,7 @@ from booking_repository import (
 from booking_datetime import parse_ai_booking_start
 from booking_repository import mark_booking_created
 from database import get_connection
+from worker_guard import await_worker
 from runtime_guard import OWNER_REF
 
 
@@ -211,11 +212,7 @@ async def _execute_confirmed_booking(
 
     # 1. Controllo preventivo dei duplicati.
     try:
-        with get_connection(postgres_password) as connection:
-            existing = get_booking_operation(
-                connection,
-                request_key,
-            )
+        existing = await asyncio.to_thread(read_booking, postgres_password, request_key)
 
         if existing is not None:
             status, _ = existing
@@ -289,7 +286,7 @@ async def _execute_confirmed_booking(
 
     # 4. Registrazione PostgreSQL prima della scrittura Google.
     try:
-        registration = await asyncio.to_thread(
+        registration = await await_worker(
             register_ai_booking,
             request_key,
             postgres_password,
@@ -303,11 +300,7 @@ async def _execute_confirmed_booking(
                 "Nessuna nuova prenotazione eseguita."
             )
 
-        with get_connection(postgres_password) as connection:
-            operation = get_booking_operation(
-                connection,
-                request_key,
-            )
+        operation = await asyncio.to_thread(read_booking, postgres_password, request_key)
 
         if (
             operation is None
@@ -335,7 +328,7 @@ async def _execute_confirmed_booking(
     # 5. Creazione Google Calendar.
     # Da questo punto l'esito potrebbe diventare incerto.
     try:
-        result = await asyncio.to_thread(
+        result = await await_worker(
             process_booking,
             calendar_id,
             f"Allenamento - {intent.cliente}",
@@ -363,12 +356,7 @@ async def _execute_confirmed_booking(
             and result.status == BookingStatus.CREATED
             and result.event_id == google_event_id
         ):
-            with get_connection(postgres_password) as connection:
-                saved = mark_booking_created(
-                    connection,
-                    request_key,
-                    google_event_id,
-                )
+            saved = await await_worker(save_booking, postgres_password, mark_booking_created, request_key, google_event_id)
 
             if not saved:
                 raise RuntimeError(
@@ -385,11 +373,7 @@ async def _execute_confirmed_booking(
             result is not None
             and result.status == BookingStatus.CONFLICT
         ):
-            with get_connection(postgres_password) as connection:
-                saved = mark_booking_failed(
-                    connection,
-                    request_key,
-                )
+            saved = await await_worker(save_booking, postgres_password, mark_booking_failed, request_key)
 
             if not saved:
                 raise RuntimeError(
@@ -404,11 +388,7 @@ async def _execute_confirmed_booking(
 
         # Tutti gli altri risultati sono trattati come incerti.
         # Include UNKNOWN, eccezioni e ID Google inattesi.
-        with get_connection(postgres_password) as connection:
-            saved = mark_booking_unknown(
-                connection,
-                request_key,
-            )
+        saved = await await_worker(save_booking, postgres_password, mark_booking_unknown, request_key)
 
         if not saved:
             raise RuntimeError(
@@ -435,6 +415,18 @@ async def _execute_confirmed_booking(
             "Verifica Google Calendar e PostgreSQL.\n"
             "Non ripetere automaticamente la richiesta."
         )
+
+
+def read_booking(password, request_key):
+    """Own the complete read transaction in the calling worker."""
+    with get_connection(password) as connection:
+        return get_booking_operation(connection, request_key)
+
+
+def save_booking(password, update, *args):
+    """Return only after the outcome transaction has committed and closed."""
+    with get_connection(password) as connection:
+        return update(connection, *args)
 
 
 def register_ai_booking(
@@ -577,8 +569,7 @@ async def format_ai_result(intent, calendar_id, request_key, postgres_password):
     summary = format_intent_summary(intent)
     if intent.operazione != "crea":
         return summary
-    with get_connection(postgres_password) as connection:
-        existing = get_booking_operation(connection, request_key)
+    existing = await asyncio.to_thread(read_booking, postgres_password, request_key)
     if existing is None:
         return summary + "Conferma esplicita necessaria. Nessuna creazione avviata."
     status, event_id = existing
@@ -601,8 +592,7 @@ async def prepare_creation(update, context, intent, calendar_id, request_key, po
     try:
         if not calendar_id or calendar_id.strip().lower() == "primary" or not request_key:
             raise ValueError("Contesto non valido")
-        with get_connection(postgres_password) as connection:
-            existing = get_booking_operation(connection, request_key)
+        existing = await asyncio.to_thread(read_booking, postgres_password, request_key)
         if existing is not None:
             result = await format_ai_result(intent, calendar_id, request_key, postgres_password)
             await deliver_creation_message(update.effective_message.reply_text, result)
@@ -661,8 +651,7 @@ async def handle_ai_booking_callback(update, context, allowed_user_id, postgres_
                 "Prenotazione in preparazione annullata. Nessun appuntamento esistente cancellato.")
             return
         try:
-            with get_connection(postgres_password) as connection:
-                existing = get_booking_operation(connection, plan.request_key)
+            existing = await asyncio.to_thread(read_booking, postgres_password, plan.request_key)
             if existing is not None:
                 result = await format_ai_result(plan.intent, calendar_id, plan.request_key, postgres_password)
             else:

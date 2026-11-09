@@ -1,5 +1,6 @@
 """Expiring AI deletion conversation, separate from traditional /cancella."""
 import asyncio
+from worker_guard import await_worker
 from dataclasses import replace
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ai.date_utils import normalize_relative_date
@@ -131,7 +132,7 @@ async def callback(update,context,allowed_user_id,calendar_id,password):
                 await show_plan(query.edit_message_text,session,service,repo,session['ids'][index])
                 context.user_data['ai_delete']=session
                 return
-            result=await asyncio.to_thread(execute,service,repo,session['plan'],calendar_id,OWNER_REF)
+            result=await await_worker(execute,service,repo,session['plan'],calendar_id,OWNER_REF)
             messages={
                 'DELETED':'✅ Appuntamento cancellato.',
                 'STALE':'Appuntamento cambiato nel frattempo. Serve una nuova selezione e conferma.',
