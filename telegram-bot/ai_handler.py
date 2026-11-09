@@ -32,6 +32,7 @@ from booking_repository import (
 from booking_datetime import parse_ai_booking_start
 from booking_repository import mark_booking_created
 from database import get_connection
+from runtime_guard import OWNER_REF
 
 
 interpreter = AppointmentInterpreter(OllamaClient())
@@ -225,7 +226,7 @@ async def format_ai_result(
     except Exception as error:
         print(
             "Errore controllo duplicati: "
-            f"{type(error).__name__}: {error}"
+            f"{type(error).__name__}"
         )
 
         return (
@@ -280,6 +281,7 @@ async def format_ai_result(
             register_ai_booking,
             request_key,
             postgres_password,
+            calendar_id,
         )
 
         if registration == RegistrationResult.ALREADY_EXISTS:
@@ -309,7 +311,7 @@ async def format_ai_result(
     except Exception as error:
         print(
             "Errore registrazione PostgreSQL: "
-            f"{type(error).__name__}: {error}"
+            f"{type(error).__name__}"
         )
 
         return (
@@ -328,12 +330,15 @@ async def format_ai_result(
             start,
             intent.durata_minuti,
             google_event_id,
+            before_google_write=lambda: record_google_write_start(
+                postgres_password, request_key, google_event_id, calendar_id
+            ),
         )
 
     except Exception as error:
         print(
             "Errore chiamata servizio prenotazione: "
-            f"{type(error).__name__}: {error}"
+            f"{type(error).__name__}"
         )
 
         result = None
@@ -407,7 +412,7 @@ async def format_ai_result(
     except Exception as error:
         print(
             "Errore aggiornamento stato prenotazione: "
-            f"{type(error).__name__}: {error}"
+            f"{type(error).__name__}"
         )
 
         return (
@@ -422,11 +427,15 @@ async def format_ai_result(
 def register_ai_booking(
     request_key: str,
     postgres_password: str,
+    calendar_id: str,
 ) -> RegistrationResult:
     """Registra una richiesta AI e assegna un ID Google univoco."""
 
     if not request_key or not request_key.strip():
         raise ValueError("request_key AI mancante o non valida")
+
+    if not calendar_id or calendar_id == "primary":
+        raise ValueError("Calendario non valido")
 
     with get_connection(postgres_password) as connection:
         result = register_booking(connection, request_key)
@@ -443,6 +452,13 @@ def register_ai_booking(
             if not assigned:
                 raise RuntimeError(
                     "Impossibile assegnare l'ID Google alla prenotazione"
+                )
+
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE booking_operations SET calendar_id=%s, owner_ref=%s, "
+                    "execution_version=2 WHERE request_key=%s AND status='PENDING'",
+                    (calendar_id, OWNER_REF, request_key),
                 )
 
     return result
@@ -604,6 +620,7 @@ async def handle_ai_booking_callback(
                 register_ai_booking,
                 request_key,
                 postgres_password,
+                calendar_id,
             )
 
             if registration == RegistrationResult.ALREADY_EXISTS:
@@ -638,6 +655,9 @@ async def handle_ai_booking_callback(
                 intent.durata_minuti,
                 google_event_id,
                 True,
+                before_google_write=lambda: record_google_write_start(
+                    postgres_password, request_key, google_event_id, calendar_id
+                ),
             )
 
             if (
@@ -686,7 +706,7 @@ async def handle_ai_booking_callback(
         except Exception as error:
             print(
                 "Errore conferma prenotazione AI: "
-                f"{type(error).__name__}: {error}"
+                f"{type(error).__name__}"
             )
 
             await query.edit_message_text(
@@ -694,3 +714,17 @@ async def handle_ai_booking_callback(
                 "Verifica Google Calendar e PostgreSQL.\n"
                 "Nessun nuovo tentativo automatico."
             )
+
+def record_google_write_start(password, request_key, event_id, calendar_id):
+    """Commit the write boundary; failure prevents any Google insert."""
+    with get_connection(password) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE booking_operations SET google_write_started_at=NOW(), updated_at=NOW() "
+                "WHERE request_key=%s AND google_event_id=%s AND calendar_id=%s "
+                "AND owner_ref=%s AND execution_version=2 AND status='PENDING' "
+                "AND google_write_started_at IS NULL RETURNING id",
+                (request_key, event_id, calendar_id, OWNER_REF),
+            )
+            if cursor.fetchone() is None:
+                raise RuntimeError("Avvio scrittura non autorizzato")

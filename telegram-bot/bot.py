@@ -987,4 +987,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from runtime_guard import runtime_guard
+    with runtime_guard():
+        main()

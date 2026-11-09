@@ -35,3 +35,4 @@ main_legacy.py
 # Database e file locali
 *.sqlite3
 *.db
+.booking-runtime.lock

@@ -42,6 +42,7 @@ def process_booking(
     duration_minutes: int,
     booking_id: str | None = None,
     force_booking: bool = False,
+    before_google_write=None,
 ) -> BookingResult:
     """
     Crea un appuntamento Google Calendar.
@@ -94,6 +95,10 @@ def process_booking(
             f"{type(error).__name__}"
         )
         return BookingResult(BookingStatus.UNKNOWN)
+
+    if before_google_write is not None:
+        # Outside the insert exception handler: a failed commit must prevent Google I/O.
+        before_google_write()
 
     # Da questo punto può iniziare una scrittura Google.
     # Non eseguire retry automatici della creazione.
