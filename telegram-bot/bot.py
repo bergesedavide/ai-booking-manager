@@ -95,6 +95,29 @@ def overlap_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def clear_legacy_write_state(context) -> None:
+    """Discard only traditional drafts; AI plans and read paths are untouched."""
+    for key in ("pending_bookings", "pending_reschedules", "pending_deletions"):
+        context.user_data.pop(key, None)
+
+
+async def reject_legacy_command(update, context) -> None:
+    # Called only after the original handler's authorization check.
+    clear_legacy_write_state(context)
+    await update.effective_message.reply_text(
+        "Comando non più disponibile. Scrivi la richiesta in linguaggio naturale."
+    )
+
+
+async def reject_legacy_callback(update, context) -> None:
+    # Covers old confirm AND cancel buttons, even with stale/malformed tokens.
+    clear_legacy_write_state(context)
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text(
+        "La procedura precedente non è più disponibile. Scrivi la richiesta in linguaggio naturale."
+    )
+
+
 async def prenota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Crea un appuntamento sul calendario Google di test."""
     user = update.effective_user
@@ -105,6 +128,9 @@ async def prenota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.id != ALLOWED_USER_ID:
         print("Tentativo di prenotazione non autorizzato.")
         return
+
+    await reject_legacy_command(update, context)
+    return  # M07.2B: historical implementation below is not reachable.
 
     if len(context.args) < 4:
         await message.reply_text(
@@ -205,6 +231,9 @@ async def handle_booking_callback(
         await query.answer("Non autorizzato.", show_alert=True)
         return
 
+    await reject_legacy_callback(update, context)
+    return  # M07.2B: never execute the historical Google write path.
+
     data = query.data or ""
     action, separator, request_id = data.partition(":")
     if not separator or action not in ("booking_confirm", "booking_cancel"):
@@ -264,6 +293,9 @@ async def modifica(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.id != ALLOWED_USER_ID:
         print("Tentativo di modifica non autorizzato.")
         return
+
+    await reject_legacy_command(update, context)
+    return  # M07.2B: historical implementation below is not reachable.
 
     if len(context.args) != 3:
         await message.reply_text(
@@ -476,6 +508,9 @@ async def handle_reschedule_callback(
         await query.answer("Non autorizzato.", show_alert=True)
         return
 
+    await reject_legacy_callback(update, context)
+    return  # M07.2B: never execute the historical Google write path.
+
     data = query.data or ""
     action, separator, request_id = data.partition(":")
 
@@ -646,6 +681,9 @@ async def cancella(
         print("Tentativo di cancellazione non autorizzato.")
         return
 
+    await reject_legacy_command(update, context)
+    return  # M07.2B: historical implementation below is not reachable.
+
     if len(context.args) != 1:
         await message.reply_text(
             "Formato corretto:\n/cancella EVENT_ID"
@@ -758,6 +796,9 @@ async def handle_delete_callback(
             show_alert=True,
         )
         return
+
+    await reject_legacy_callback(update, context)
+    return  # M07.2B: never execute the historical Google write path.
 
     await query.answer()
 
@@ -930,19 +971,19 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             handle_booking_callback,
-            pattern=r"^booking_(confirm|cancel):[0-9a-f]{16}$",
+            pattern=r"^booking_(confirm|cancel)(?::.*)?$",
         )
     )
     application.add_handler(
         CallbackQueryHandler(
             handle_reschedule_callback,
-            pattern=r"^reschedule_(confirm|cancel):[0-9a-f]{16}$",
+            pattern=r"^reschedule_(confirm|cancel)(?::.*)?$",
         )
     )
     application.add_handler(
         CallbackQueryHandler(
             handle_delete_callback,
-            pattern=r"^delete_(confirm|cancel):[0-9a-f]{16}$",
+            pattern=r"^delete_(confirm|cancel)(?::.*)?$",
         )
     )
 
