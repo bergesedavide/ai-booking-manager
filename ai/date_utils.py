@@ -67,7 +67,7 @@ def normalize_relative_date(
             target_weekday - reference_date.weekday()
         ) % 7
 
-        return (reference_date + timedelta(days=days_ahead).isoformat())
+        return (reference_date + timedelta(days=days_ahead)).isoformat()
 
     # 3. Date numeriche italiane.
     for date_format in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
