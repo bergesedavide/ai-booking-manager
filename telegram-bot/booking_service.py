@@ -6,7 +6,6 @@ from enum import Enum
 from pathlib import Path
 import sys
 
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -15,7 +14,7 @@ PROTOTYPE_DIR = PROJECT_ROOT / "google-calendar-prototype"
 if str(PROTOTYPE_DIR) not in sys.path:
     sys.path.insert(0, str(PROTOTYPE_DIR))
 
-from google_auth import authenticate
+from google_transport import load_existing_credentials as authenticate, build_calendar_service as build
 from google_calendar import (
     check_availability,
     create_booking,

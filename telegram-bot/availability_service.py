@@ -17,7 +17,7 @@ GOOGLE_DIR = PROJECT_ROOT / "google-calendar-prototype"
 if str(GOOGLE_DIR) not in sys.path:
     sys.path.insert(0, str(GOOGLE_DIR))
 
-from google_auth import authenticate
+from google_transport import load_existing_credentials as authenticate
 from google_calendar import AvailabilityStatus, check_availability
 
 def check_ai_availability(

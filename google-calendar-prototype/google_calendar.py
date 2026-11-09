@@ -134,7 +134,7 @@ def create_booking(
     return service.events().insert(
         calendarId=calendar_id,
         body=event,
-    ).execute()
+    ).execute(num_retries=0)
 
 def check_availability(
     service,
@@ -336,7 +336,7 @@ def update_booking(
     # Richiede che la versione dell'evento non sia cambiata.
     request.headers["If-Match"] = etag
 
-    return request.execute()
+    return request.execute(num_retries=0)
 
 
 def delete_booking(
@@ -397,7 +397,7 @@ def delete_booking(
 
     # Esegue la cancellazione.
     # Eventuali errori vengono propagati al chiamante.
-    request.execute()
+    request.execute(num_retries=0)
 
 
 def list_events_in_interval(
