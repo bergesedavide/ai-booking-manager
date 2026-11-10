@@ -53,10 +53,18 @@ class ClientService:
     def __init__(self, password: str, *, connection_factory: Callable[[str], Any] = get_connection):
         self._repository = _ClientRepository(password, connection_factory)
 
+    def schema_available(self) -> bool:
+        try:
+            return self._repository.schema_available()
+        except ClientStorageError:
+            return False
+
     def add_client(self, *, authorized_telegram_user_id: int, request_key: str,
                    first_name: str, last_name: str, phone: str | None = None,
                    email: str | None = None, notes: str | None = None,
                    allow_homonym: bool = False) -> ClientResult:
+        # Repository commits a new PENDING before its separate atomic finalization.
+        # Existing PENDING yields UNRESOLVED; it is never resumed here.
         identity = _identity(authorized_telegram_user_id)
         key = _request_key(request_key)
         if type(allow_homonym) is not bool:

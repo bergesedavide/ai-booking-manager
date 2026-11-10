@@ -93,6 +93,25 @@ async def handle_ai_message(
         print("Tentativo di accesso AI non autorizzato.")
         return
 
+    # Client routing precedes appointment reply handlers so a new client request
+    # cannot be consumed as an appointment field or silently invalidate a plan.
+    from ai_client_handler import handle_message as handle_client_message
+    async with conversation_locks:
+        key = (user.id, message.chat_id)
+        manager = conversations.get(key)
+        appointment_pending = bool(manager is not None and manager.current_intent is not None)
+        appointment_pending = appointment_pending or any(
+            getattr(plan, 'user_id', None) == user.id and getattr(plan, 'chat_id', None) == message.chat_id
+            for plan in context.user_data.get('pending_ai_bookings', {}).values()
+        )
+        for state_key in ('ai_move', 'ai_delete'):
+            session = context.user_data.get(state_key)
+            if session and (session.get('user_id'), session.get('chat_id')) == key:
+                appointment_pending = True
+        if await handle_client_message(update, context, allowed_user_id, postgres_password,
+                                       appointment_pending=appointment_pending):
+            return
+
     from ai_deletion_handler import handle_reply as handle_delete_reply
     if await handle_delete_reply(update, context, calendar_id, postgres_password):
         return
