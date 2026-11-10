@@ -35,7 +35,7 @@ class ClientSession:
 
 def is_client_request(text: str) -> bool:
     text = text.strip().casefold()
-    if not re.match(r'^(aggiungi|registra|inserisci)\b', text):
+    if not re.match(r'^(aggiungi|registra|inserisci|crea)\b', text):
         return False
     if re.search(r'\bclient[ei]\b', text):
         return True
@@ -193,7 +193,7 @@ async def handle_message(update, context, allowed_user_id, password, *, appointm
     if request_key in receipts:
         await deliver(message.reply_text, 'Questa richiesta ha un esito non confermato. Non verrà ripetuta.')
         return True
-    if re.search(r'\b(prenota|sposta|modifica|cancella|elimina)\b', text.casefold()):
+    if re.search(r'\b(prenota|sposta|modifica|cancella|elimina|appuntament[oi])\b', text.casefold()):
         await deliver(message.reply_text, 'Invia separatamente l’inserimento cliente e la richiesta sull’appuntamento.')
         return True
     service = ClientService(password)

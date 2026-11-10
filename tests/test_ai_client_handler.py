@@ -423,3 +423,63 @@ def test_initial_commit_uncertain_never_starts_client_transaction(env,monkeypatc
     assert not any(sql.startswith('INSERT INTO public.clients') for connection in store.connections
                    for sql,_ in connection.queries)
     assert len(store.operations)==(1 if mode=='after' else 0)
+
+
+@pytest.mark.parametrize('text',[
+    'Crea un nuovo cliente di nome Marco Rossi',
+    '  CREA un nuovo CLIENTE di nome Marco Rossi',
+    'Crea clienti',
+])
+def test_crea_client_routes_only_to_clients(env,text):
+    assert client.is_client_request(text)
+    run(message(text),context())
+    env.add_client.assert_called_once()
+    client.interpreter.interpret.assert_called_once()
+    ai.interpreter.interpret.assert_not_called()
+    ai.check_ai_availability.assert_not_called()
+
+
+@pytest.mark.parametrize('text',['Crea un appuntamento domani','Crea Marco Rossi','Crea clientela'])
+def test_crea_requires_explicit_client_reference(env,text):
+    assert not client.is_client_request(text)
+    assert not asyncio.run(client.handle_message(message(text),context(),1,'unused'))
+    client.interpreter.interpret.assert_not_called()
+    env.add_client.assert_not_called()
+
+
+def test_crea_appointment_reaches_existing_appointment_interpreter(env,monkeypatch):
+    from ai.schemas import AppointmentIntent
+    monkeypatch.setattr(ai.interpreter,'interpret',Mock(return_value=AppointmentIntent('crea',data='2026-11-30')))
+    run(message('Crea un appuntamento domani'),context())
+    ai.interpreter.interpret.assert_called_once_with('Crea un appuntamento domani')
+    client.interpreter.interpret.assert_not_called()
+    env.add_client.assert_not_called()
+
+
+@pytest.mark.parametrize('kind',['collect','creation_confirm','creation_overlap','move_collect',
+    'move_select','move_confirm','move_overlap','delete_collect','delete_select','delete_confirm'])
+def test_crea_client_does_not_alter_pending_appointment(env,kind):
+    c=context()
+    if kind=='collect':ai.conversations[(1,2)]=SimpleNamespace(current_intent=object())
+    elif kind.startswith('creation'):
+        c.user_data['pending_ai_bookings']={'token':SimpleNamespace(user_id=1,chat_id=2,phase=kind)}
+    else:
+        key='ai_move' if kind.startswith('move') else 'ai_delete'
+        c.user_data[key]=dict(user_id=1,chat_id=2,stage=kind)
+    before=c.user_data.copy();conversations=ai.conversations.copy()
+    run(message('Crea un nuovo cliente di nome Marco Rossi'),c)
+    assert c.user_data==before and ai.conversations==conversations
+    env.schema_available.assert_not_called();env.add_client.assert_not_called()
+    client.interpreter.interpret.assert_not_called();ai.interpreter.interpret.assert_not_called()
+
+
+@pytest.mark.parametrize('text',[
+    'Crea un nuovo cliente di nome Marco Rossi e prenota domani',
+    'Crea un nuovo cliente di nome Marco Rossi e crea un appuntamento domani',
+    'Crea cliente Marco Rossi e appuntamenti domani',
+])
+def test_crea_mixed_request_no_write_or_fallback(env,text):
+    assert client.is_client_request(text)
+    run(message(text),context())
+    env.schema_available.assert_not_called();env.add_client.assert_not_called()
+    client.interpreter.interpret.assert_not_called();ai.interpreter.interpret.assert_not_called()
